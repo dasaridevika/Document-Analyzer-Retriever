@@ -23,7 +23,6 @@ class HistoryStore:
     def _init_db(self):
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # Create Sessions table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY,
@@ -35,7 +34,6 @@ class HistoryStore:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Create Messages table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     message_id TEXT PRIMARY KEY,
@@ -67,7 +65,7 @@ class HistoryStore:
             conn.commit()
         return session_id
 
-    def list_sessions() -> List[Dict[str, Any]]:
+    def list_sessions(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -106,7 +104,6 @@ class HistoryStore:
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (message_id, session_id, role, content, sources_str, now))
             
-            # Update session timestamp
             cursor.execute("""
                 UPDATE sessions SET updated_at = ? WHERE session_id = ?
             """, (now, session_id))

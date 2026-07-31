@@ -9,7 +9,16 @@ load_dotenv()
 
 # Base directories
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "storage"))
+
+# Persistent Storage Path (Defaults to /app/storage inside Railway Docker container)
+env_data_dir = os.getenv("DATA_DIR")
+if env_data_dir:
+    DATA_DIR = Path(env_data_dir)
+elif Path("/app").exists():
+    DATA_DIR = Path("/app/storage")
+else:
+    DATA_DIR = BASE_DIR / "storage"
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 VECTOR_DB_DIR = DATA_DIR / "vector_db"
@@ -29,9 +38,9 @@ CLOUDFLARE_LLM_MODEL = os.getenv(
     "CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3-8b-instruct"
 )
 
-# API Host & Port (Internal port 8001 to prevent port collision with Railway $PORT)
-BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
-BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8001))
+# API Host & Port
+BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
+BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8000))
 
 # Default System Prompt presets
 DEFAULT_SYSTEM_PROMPT = """You are a precise, highly analytical Document AI assistant.
