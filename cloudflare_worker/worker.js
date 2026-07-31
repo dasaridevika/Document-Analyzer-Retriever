@@ -1,11 +1,10 @@
 /**
  * Cloudflare Worker for Document Analysis & BGE Large Embeddings
- * Uses Cloudflare Workers AI bindings (@cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3-8b-instruct)
+ * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3-8b-instruct
  */
 
 export default {
   async fetch(request, env, ctx) {
-    // Enable CORS headers
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
@@ -38,10 +37,8 @@ export default {
           );
         }
 
-        // Support string or array of strings
         const textList = Array.isArray(textInput) ? textInput : [textInput];
 
-        // Call Cloudflare Workers AI embedding model
         const embeddings = await env.AI.run("@cf/baai/bge-large-en-v1.5", {
           text: textList,
         });
@@ -56,8 +53,8 @@ export default {
         );
       }
 
-      // 2. DOCUMENT ANALYSIS ENDPOINT (@cf/meta/llama-3-8b-instruct)
-      if (url.pathname === "/analyze" || url.pathname === "/") {
+      // 2. CHAT & DOCUMENT ANALYSIS ENDPOINT (@cf/meta/llama-3-8b-instruct - ChatGPT Detailed Style)
+      if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ error: "Method not allowed" }), {
             status: 405,
@@ -66,34 +63,26 @@ export default {
         }
 
         const body = await request.json();
-        const { text, title = "", analysis_type = "summary", prompt = "" } = body;
+        const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        if (!text) {
-          return new Response(
-            JSON.stringify({ error: "Missing 'text' parameter for analysis" }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
+        const effectiveSystemPrompt = system_prompt || `You are an expert AI Document Assistant.
+Your goal is to provide comprehensive, detailed, and thoroughly structured explanations like ChatGPT.
+Break down complex topics into clear sections, use bullet points, bold key concepts, and cite page numbers whenever mentioned in the context.
+Deliver rich, informative responses that answer the user's question completely based on the provided document excerpts.`;
 
-        const systemPrompt = `You are an expert Document Analysis AI. Analyze the provided document text and output a JSON object containing EXACTLY these keys:
-- "summary": String concise summary.
-- "topics": Array of string topics.
-- "keywords": Array of string key terms.
-- "sentiment": String ("positive", "negative", or "neutral").
-- "important_points": Array of key takeaways.
-- "action_items": Array of actionable next steps.
+        const userMessage = query || prompt || text;
+        const contextText = text || "";
 
-Return ONLY a valid JSON object without markdown wrappers or code blocks.`;
+        const messages = [
+          { role: "system", content: `${effectiveSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextText}` },
+          { role: "user", content: userMessage },
+        ];
 
-        const userPrompt = `${prompt}\n\nDocument Title: ${title}\nContent:\n${text}`;
-
+        // Run Llama-3 8B Instruct model with high token limit for detailed responses
         const llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.2,
-          max_tokens: 1500,
+          messages: messages,
+          temperature: 0.3,
+          max_tokens: 2500,
         });
 
         return new Response(
@@ -101,6 +90,7 @@ Return ONLY a valid JSON object without markdown wrappers or code blocks.`;
             success: true,
             model: "@cf/meta/llama-3-8b-instruct",
             result: llmResponse,
+            response: llmResponse.response || llmResponse,
           }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );

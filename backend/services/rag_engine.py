@@ -8,13 +8,14 @@ from backend.config import (
     CLOUDFLARE_LLM_MODEL,
     DEFAULT_SYSTEM_PROMPT
 )
+from backend.services.worker_analyzer import WORKER_BASE_URL
 
 logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    High-Quality Natural RAG Engine:
-    Delivers direct, intelligent chatbot responses without artificial template boilerplate.
+    High-Quality ChatGPT-Style RAG Engine:
+    Delivers detailed, multi-paragraph, structured, and comprehensive document analysis.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -23,6 +24,7 @@ class RAGEngine:
         self.account_id = CLOUDFLARE_ACCOUNT_ID
         self.api_token = CLOUDFLARE_API_TOKEN
         self.llm_model = CLOUDFLARE_LLM_MODEL
+        self.worker_base_url = WORKER_BASE_URL
 
     def answer_query(
         self,
@@ -30,12 +32,16 @@ class RAGEngine:
         filename: str = None,
         system_prompt: str = None,
         top_k: int = 5,
-        temperature: float = 0.2
+        temperature: float = 0.3
     ) -> Dict[str, Any]:
         """
-        Executes complete natural RAG conversation pipeline.
+        Executes complete ChatGPT-style detailed response generation.
         """
-        effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        effective_system_prompt = system_prompt or """You are an expert AI Document Assistant.
+Provide comprehensive, detailed, and thoroughly structured explanations like ChatGPT.
+Break down topics into clear sections, use bullet points, bold key concepts, and cite page numbers whenever mentioned in the context.
+Deliver rich, informative responses that answer the user's question completely based on the provided document excerpts."""
+
         clean_query = query.strip()
 
         # Handle Conversational Greetings Naturally
@@ -43,7 +49,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your Document AI Assistant. Ask me any question about {doc_name}, and I will analyze the content and provide clear, accurate answers for you.",
+                "answer": f"Hello! I am your AI Document Assistant. Ask me any question about {doc_name}, and I will analyze the context to provide detailed, structured explanations with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -64,7 +70,7 @@ class RAGEngine:
 
         if not retrieved_chunks:
             return {
-                "answer": "I searched the document, but I could not find relevant information matching your question.",
+                "answer": "I searched the document context, but I could not find relevant information matching your question.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -77,8 +83,8 @@ class RAGEngine:
             context_blocks.append(f"[Document Excerpt | Page {page_num}]\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Natural Chatbot Answer
-        answer = self._generate_chatbot_response(
+        # 4. Generate ChatGPT-style Detailed Answer
+        answer = self._generate_detailed_chatbot_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
             query=clean_query,
@@ -104,7 +110,38 @@ class RAGEngine:
             "retrieved_count": len(retrieved_chunks)
         }
 
-    def _generate_cloudflare_llm(
+    def _generate_cloudflare_worker_llm(
+        self, system_prompt: str, context: str, query: str, temperature: float
+    ) -> str:
+        """
+        Calls Cloudflare Worker /analyze endpoint running @cf/meta/llama-3-8b-instruct
+        """
+        worker_url = f"{self.worker_base_url}/chat" if self.worker_base_url else ""
+        if not worker_url:
+            worker_url = f"{self.worker_base_url}/analyze" if self.worker_base_url else ""
+
+        if not worker_url:
+            raise ValueError("No worker URL")
+
+        payload = {
+            "query": query,
+            "text": context,
+            "system_prompt": system_prompt,
+            "temperature": temperature
+        }
+
+        resp = requests.post(worker_url, json=payload, timeout=45)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Cloudflare Worker LLM returned {resp.status_code}")
+
+        data = resp.json()
+        ans = data.get("response") or data.get("result", {}).get("response", "")
+        if isinstance(ans, str) and len(ans.strip()) > 10:
+            return ans.strip()
+
+        raise ValueError("Invalid worker response")
+
+    def _generate_cloudflare_rest_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.llm_model}"
@@ -114,19 +151,19 @@ class RAGEngine:
         }
 
         messages = [
-            {"role": "system", "content": f"{system_prompt}\n\nDocument Context:\n{context}\n\nAnswer the user query concisely and naturally based strictly on the provided context."},
-            {"role": "user", "content": query}
+            {"role": "system", "content": f"{system_prompt}\n\nDOCUMENT CONTEXT:\n{context}"},
+            {"role": "user", "content": f"Based on the document context provided, answer the following question in detail:\n{query}"}
         ]
 
         payload = {
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": 1024
+            "max_tokens": 2500
         }
 
         resp = requests.post(url, headers=headers, json=payload, timeout=45)
         if resp.status_code != 200:
-            raise RuntimeError(f"Cloudflare Workers AI LLM HTTP {resp.status_code}")
+            raise RuntimeError(f"Cloudflare REST API LLM HTTP {resp.status_code}")
 
         data = resp.json()
         if not data.get("success"):
@@ -136,40 +173,63 @@ class RAGEngine:
         ans = result.get("response", "").strip()
         return ans
 
-    def _generate_chatbot_response(
+    def _generate_detailed_chatbot_response(
         self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
-        # Try Cloudflare LLM Generation first
+        # Option A: Cloudflare Worker URL LLM
+        if self.worker_base_url:
+            try:
+                ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
+                if ans:
+                    return ans
+            except Exception as e:
+                logger.warning(f"Cloudflare Worker LLM call failed: {e}")
+
+        # Option B: Direct Cloudflare REST API LLM
         if self.account_id and self.api_token:
             try:
-                llm_ans = self._generate_cloudflare_llm(system_prompt, context, query, temperature)
-                if llm_ans and len(llm_ans) > 5:
-                    return llm_ans
+                ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature)
+                if ans:
+                    return ans
             except Exception as e:
-                logger.warning(f"Cloudflare Workers AI LLM call failed: {e}. Using high-precision synthesis engine.")
+                logger.warning(f"Direct Cloudflare REST LLM call failed: {e}")
 
-        # High-Precision Natural Synthesis Engine (No template fluff)
+        # Option C: High-Detailed ChatGPT-Style Synthesizer
         pages_referenced = sorted(list(set([
             c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
         ])))
         page_str = f" (Page {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
 
-        # Extract primary facts directly matching the query
-        top_text = retrieved_chunks[0]["text"].strip()
-        
-        # Build natural paragraph output
-        if len(retrieved_chunks) == 1:
-            return f"Based on the document{page_str}:\n\n{top_text}"
+        response_sections = [
+            f"Based on a detailed analysis of the document{page_str}, here is a comprehensive breakdown for **\"{query}\"**:\n"
+        ]
 
-        # Combine facts seamlessly
-        key_snippets = []
-        for chunk in retrieved_chunks[:3]:
-            txt = chunk["text"].strip()
-            # Clean up linebreaks
-            clean_txt = " ".join([l.strip() for l in txt.splitlines() if l.strip()])
-            page_num = chunk["metadata"].get("page_number")
-            p_tag = f" *(Page {page_num})*" if page_num else ""
-            key_snippets.append(f"• {clean_txt}{p_tag}")
+        # Group facts into structured sections
+        for idx, chunk in enumerate(retrieved_chunks[:4]):
+            page_num = chunk["metadata"].get("page_number", "?")
+            text = chunk["text"].strip()
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-        facts_block = "\n".join(key_snippets)
-        return f"Based on the document{page_str}, here are the key details matching your question:\n\n{facts_block}"
+            if lines:
+                section_title = lines[0][:80] if len(lines[0]) < 80 else f"Key Insights from Page {page_num}"
+                section_body = "\n".join(lines[1:]) if len(lines) > 1 else lines[0]
+
+                response_sections.append(f"### {idx+1}. {section_title} *(Page {page_num})*\n")
+                
+                # Format paragraph text cleanly
+                clean_body = re.sub(r'\s+', ' ', section_body)
+                response_sections.append(f"{clean_body}\n")
+
+        # Summary Takeaway
+        response_sections.append("### Summary & Key Takeaways\n")
+        takeaways = []
+        for c in retrieved_chunks[:3]:
+            snippet = c["text"].strip().replace("\n", " ")
+            if len(snippet) > 140:
+                snippet = snippet[:140] + "..."
+            pg = c["metadata"].get("page_number", "?")
+            takeaways.append(f"- **Page {pg}**: {snippet}")
+
+        response_sections.append("\n".join(takeaways))
+
+        return "\n\n".join(response_sections)
