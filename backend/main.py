@@ -23,8 +23,8 @@ logger = logging.getLogger("doc_analyser_backend")
 
 app = FastAPI(
     title="Document Analyser & Retriever API",
-    description="S3-Exclusive Storage Bucket RAG Backend with PyMuPDF & Cloudflare Workers AI",
-    version="2.0.0"
+    description="S3-Exclusive Storage Bucket RAG Backend with User-Level Privacy Isolation",
+    version="2.1.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -49,12 +49,14 @@ document_cache: Dict[str, Dict[str, Any]] = {}
 # Pydantic Schemas
 class ProcessRequest(BaseModel):
     filename: str
+    user_id: Optional[str] = "default_user"
     strategy: str = "recursive"
     chunk_size: int = 500
     chunk_overlap: int = 50
 
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
+    user_id: Optional[str] = "default_user"
     query: str
     filename: Optional[str] = None
     system_prompt: Optional[str] = DEFAULT_SYSTEM_PROMPT
@@ -65,6 +67,7 @@ class ChatRequest(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     filename: str
+    user_id: Optional[str] = "default_user"
     url: Optional[str] = ""
     title: Optional[str] = ""
     analysis_type: Optional[str] = "summary"
@@ -81,44 +84,46 @@ def health_check():
         "bucket_name": storage_bucket.bucket_name
     }
 
-def _save_and_parse_pdf_to_s3(file: UploadFile) -> Dict[str, Any]:
-    """
-    Saves PDF file directly to S3 Storage Bucket and parses text in memory.
-    """
+def _save_and_parse_pdf_to_s3(file: UploadFile, user_id: str = "default_user") -> Dict[str, Any]:
     file.file.seek(0)
     file_bytes = file.file.read()
 
-    # 1. Save directly into S3 Storage Bucket
-    bucket_info = storage_bucket.save_file(file.filename, file_bytes)
+    # Save to S3 / Storage Bucket with user_id metadata
+    bucket_info = storage_bucket.save_file(file.filename, file_bytes, user_id=user_id)
 
-    # 2. Parse PDF text from bytes directly
+    # Parse PDF text in memory
     parsed_doc = PDFParser.parse_pdf_bytes(file_bytes, file.filename)
     parsed_doc["bucket_info"] = bucket_info
+    parsed_doc["user_id"] = user_id
     gc.collect()
     return parsed_doc
 
 @app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    user_id: str = Form("default_user")
+):
     """
-    Uploads PDF file directly into the S3 Storage Bucket.
+    Uploads PDF file directly into Storage Bucket tagged with user_id.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     try:
-        parsed_doc = await run_in_threadpool(_save_and_parse_pdf_to_s3, file)
+        parsed_doc = await run_in_threadpool(_save_and_parse_pdf_to_s3, file, user_id)
         document_cache[file.filename] = parsed_doc
 
         return {
-            "message": f"PDF '{file.filename}' uploaded directly to S3 Storage Bucket successfully.",
+            "message": f"PDF '{file.filename}' uploaded directly to Storage Bucket successfully.",
             "filename": file.filename,
+            "user_id": user_id,
             "bucket_info": parsed_doc.get("bucket_info"),
             "metadata": parsed_doc["metadata"],
             "page_count": len(parsed_doc["pages"])
         }
     except Exception as e:
         logger.error(f"S3 Upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"S3 Storage Bucket upload error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Storage Bucket upload error: {str(e)}")
 
 @app.post("/api/process")
 async def process_chunks(req: ProcessRequest):
@@ -129,7 +134,7 @@ async def process_chunks(req: ProcessRequest):
             parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, file_bytes, filename)
             document_cache[filename] = parsed_doc
         else:
-            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in S3 Storage Bucket.")
+            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in Storage Bucket.")
 
     doc_data = document_cache[filename]
     pages_data = doc_data["pages"]
@@ -155,47 +160,38 @@ async def process_chunks(req: ProcessRequest):
     gc.collect()
 
     return {
-        "message": f"Successfully chunked and indexed {len(chunks)} text chunks for '{filename}' in S3 Storage Bucket.",
+        "message": f"Successfully chunked and indexed {len(chunks)} text chunks for '{filename}'.",
         "filename": filename,
+        "user_id": req.user_id,
         "strategy": req.strategy,
-        "chunk_count": len(chunks),
-        "sample_chunk": chunks[0] if chunks else None
-    }
-
-@app.post("/api/analyze")
-async def analyze_document_endpoint(req: AnalyzeRequest):
-    filename = req.filename
-    if filename not in document_cache:
-        file_bytes = await run_in_threadpool(storage_bucket.get_file, filename)
-        if file_bytes:
-            parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, file_bytes, filename)
-            document_cache[filename] = parsed_doc
-        else:
-            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in S3 Storage Bucket.")
-
-    doc_text = document_cache[filename].get("full_text", "")
-    analysis_result = await analyze_extracted_data(
-        url=req.url or filename,
-        title=req.title or filename,
-        extracted_text=doc_text,
-        analysis_type=req.analysis_type
-    )
-
-    document_cache[filename]["analysis"] = analysis_result
-    return {
-        "filename": filename,
-        "analysis": analysis_result
+        "chunk_count": len(chunks)
     }
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
     session_id = req.session_id
     filename = req.filename or "General Document"
+    user_id = req.user_id or "default_user"
 
     if not session_id:
         session_id = await run_in_threadpool(
             history_store.create_session,
-            filename, req.system_prompt, req.chunk_strategy, req.chunk_size
+            session_id=session_id or f"sess_{user_id[:6]}",
+            user_id=user_id,
+            filename=filename,
+            system_prompt=req.system_prompt,
+            chunk_strategy=req.chunk_strategy,
+            chunk_size=req.chunk_size
+        )
+    else:
+        await run_in_threadpool(
+            history_store.create_session,
+            session_id=session_id,
+            user_id=user_id,
+            filename=filename,
+            system_prompt=req.system_prompt,
+            chunk_strategy=req.chunk_strategy,
+            chunk_size=req.chunk_size
         )
 
     # Save User Message to History
@@ -215,6 +211,7 @@ async def chat_endpoint(req: ChatRequest):
 
     return {
         "session_id": session_id,
+        "user_id": user_id,
         "query": req.query,
         "answer": rag_result["answer"],
         "sources": rag_result["sources"],
@@ -223,10 +220,14 @@ async def chat_endpoint(req: ChatRequest):
     }
 
 @app.get("/api/bucket/files")
-async def list_bucket_files():
-    files = await run_in_threadpool(storage_bucket.list_files)
+async def list_bucket_files(user_id: Optional[str] = Query(None)):
+    """
+    Lists files uploaded strictly by the requested user_id.
+    """
+    files = await run_in_threadpool(storage_bucket.list_files, user_id=user_id)
     return {
         "bucket_name": storage_bucket.bucket_name,
+        "user_id": user_id,
         "files": files
     }
 
@@ -234,12 +235,15 @@ async def list_bucket_files():
 async def delete_bucket_file(filename: str):
     deleted = await run_in_threadpool(storage_bucket.delete_file, filename)
     if not deleted:
-        raise HTTPException(status_code=404, detail="File not found in S3 Storage Bucket.")
-    return {"message": f"Deleted '{filename}' from S3 Storage Bucket."}
+        raise HTTPException(status_code=404, detail="File not found in Storage Bucket.")
+    return {"message": f"Deleted '{filename}' from Storage Bucket."}
 
 @app.get("/api/sessions")
-async def list_sessions():
-    return await run_in_threadpool(history_store.list_sessions)
+async def list_sessions(user_id: Optional[str] = Query(None)):
+    """
+    Lists chat sessions created strictly by the requested user_id.
+    """
+    return await run_in_threadpool(history_store.list_sessions, user_id=user_id)
 
 @app.get("/api/sessions/{session_id}")
 async def get_session_details(session_id: str):
@@ -259,15 +263,6 @@ async def delete_session(session_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"message": "Session deleted successfully."}
-
-@app.get("/api/chunks/{filename}")
-def get_document_chunks(filename: str):
-    if filename not in document_cache or "chunks" not in document_cache[filename]:
-        raise HTTPException(status_code=404, detail="Chunks not available for this document.")
-    return {
-        "filename": filename,
-        "chunks": document_cache[filename]["chunks"]
-    }
 
 if __name__ == "__main__":
     uvicorn.run("backend.main:app", host=BACKEND_HOST, port=BACKEND_PORT, reload=True)

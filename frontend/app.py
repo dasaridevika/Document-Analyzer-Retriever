@@ -49,15 +49,15 @@ def load_css():
 
 load_css()
 
-# Session State Initialization (Isolated Per User / Browser Tab)
+# Strict Per-User Privacy Session State Initialization
 if "user_id" not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())[:8]
+    st.session_state.user_id = f"usr_{uuid.uuid4().hex[:8]}"
 if "current_filename" not in st.session_state:
     st.session_state.current_filename = None
 if "doc_metadata" not in st.session_state:
     st.session_state.doc_metadata = None
 if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())[:8]
+    st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "system_prompt" not in st.session_state:
@@ -67,7 +67,7 @@ if "active_nav" not in st.session_state:
 if "top_k" not in st.session_state:
     st.session_state.top_k = 8
 
-# --- LEFT SIDEBAR (NAV, ISOLATED USER SESSION & STORAGE BUCKET FILES) ---
+# --- LEFT SIDEBAR (NAV, USER BADGE, BUCKET FILES & SESSIONS) ---
 with st.sidebar:
     col_icon, col_txt = st.columns([0.25, 0.75])
     with col_icon:
@@ -78,14 +78,14 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Health Check & User Session Badge
+    # Health Check & User Privacy ID Badge
     try:
         active_url = get_backend_url()
         h_resp = requests.get(f"{active_url}/api/health", timeout=3)
         if h_resp.status_code == 200:
             h_data = h_resp.json()
             bucket = h_data.get("bucket_name", "Storage Bucket")
-            st.success(f"🟢 User Session `{st.session_state.session_id}` | Bucket: `{bucket}`")
+            st.success(f"🔒 Private User: `{st.session_state.user_id}`")
     except Exception:
         st.warning("🟠 Backend Starting...")
 
@@ -94,19 +94,19 @@ with st.sidebar:
     # Navigation Menu
     st.session_state.active_nav = st.radio(
         "Navigation",
-        ["💬 Chat", "📥 Upload Document", "📦 Storage Bucket Files", "🕒 Saved Chat History"],
+        ["💬 Chat", "📥 Upload Document", "📦 My Storage Bucket Files", "🕒 My Saved Chat History"],
         label_visibility="collapsed"
     )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # New Isolated Chat Session Button
-    if st.button("➕ Start New Isolated Session", use_container_width=True):
-        st.session_state.session_id = str(uuid.uuid4())[:8]
+    # New Private Chat Session Button
+    if st.button("➕ Start New Private Session", use_container_width=True):
+        st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
         st.session_state.messages = []
         st.session_state.current_filename = None
         st.session_state.active_nav = "💬 Chat"
-        st.success(f"New session '{st.session_state.session_id}' initialized!")
+        st.success(f"New private session initialized!")
         st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -120,7 +120,8 @@ with st.sidebar:
                     try:
                         target_backend = get_backend_url()
                         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-                        up_resp = requests.post(f"{target_backend}/api/upload", files=files, timeout=180)
+                        data = {"user_id": st.session_state.user_id}
+                        up_resp = requests.post(f"{target_backend}/api/upload", files=files, data=data, timeout=180)
                         if up_resp.status_code == 200:
                             up_data = up_resp.json()
                             st.session_state.current_filename = up_data["filename"]
@@ -129,13 +130,14 @@ with st.sidebar:
                             # Process chunking
                             proc_resp = requests.post(f"{target_backend}/api/process", json={
                                 "filename": up_data["filename"],
+                                "user_id": st.session_state.user_id,
                                 "strategy": "recursive",
                                 "chunk_size": 500,
                                 "chunk_overlap": 50
                             }, timeout=180)
                             if proc_resp.status_code == 200:
                                 b_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
-                                st.success(f"'{up_data['filename']}' saved in '{b_type}' and indexed!")
+                                st.success(f"'{up_data['filename']}' saved in '{b_type}' for User `{st.session_state.user_id}`!")
                                 st.session_state.active_nav = "💬 Chat"
                                 st.rerun()
                             else:
@@ -161,22 +163,22 @@ with main_col:
     with h_col2:
         if st.button("🗑️ Clear Chat", key="clear_chat_btn"):
             st.session_state.messages = []
-            st.session_state.session_id = str(uuid.uuid4())[:8]
+            st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
             st.rerun()
 
     st.divider()
 
-    # VIEW 1: MAIN CHAT VIEW (Isolated Per User Session)
+    # VIEW 1: MAIN CHAT VIEW (Private to Current User)
     if st.session_state.active_nav == "💬 Chat" or st.session_state.active_nav == "📥 Upload Document":
         if st.session_state.current_filename:
-            st.info(f"📁 Active Document: **{st.session_state.current_filename}** | Session ID: `{st.session_state.session_id}`")
+            st.info(f"📁 Active Document: **{st.session_state.current_filename}** | Private Session: `{st.session_state.session_id}`")
         else:
-            st.warning("⚠️ No document selected. Select a PDF from the Storage Bucket tab or upload a new PDF.")
+            st.warning("⚠️ No document selected. Upload a PDF or select one from 'My Storage Bucket Files'.")
 
         chat_container = st.container()
         with chat_container:
             if not st.session_state.messages:
-                st.info("👋 Upload or select a PDF document and ask any question to start analyzing!")
+                st.info("👋 Upload a PDF document and ask any question to start analyzing!")
             else:
                 for msg in st.session_state.messages:
                     role = msg["role"]
@@ -229,6 +231,7 @@ with main_col:
                 target_backend = get_backend_url()
                 chat_payload = {
                     "session_id": st.session_state.session_id,
+                    "user_id": st.session_state.user_id,
                     "query": user_input,
                     "filename": st.session_state.current_filename,
                     "system_prompt": st.session_state.system_prompt,
@@ -264,17 +267,17 @@ with main_col:
 
         st.markdown("<p class='disclaimer-text'>Answers are generated using AI and may not always be 100% accurate.</p>", unsafe_allow_html=True)
 
-    # VIEW 2: STORAGE BUCKET FILES VIEWER
-    elif st.session_state.active_nav == "📦 Storage Bucket Files":
-        st.subheader("📦 Uploaded Storage Bucket Documents")
+    # VIEW 2: MY STORAGE BUCKET FILES (Filtered by user_id)
+    elif st.session_state.active_nav == "📦 My Storage Bucket Files":
+        st.subheader("📦 My Uploaded Documents")
+        st.caption(f"Showing documents uploaded exclusively by User `{st.session_state.user_id}`")
+
         try:
-            b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files", timeout=10)
+            b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files?user_id={st.session_state.user_id}", timeout=10)
             if b_resp.status_code == 200:
                 b_data = b_resp.json()
                 b_name = b_data.get("bucket_name", "Storage Bucket")
                 files = b_data.get("files", [])
-
-                st.caption(f"Active Storage Bucket: `{b_name}` | Total Uploaded PDFs: `{len(files)}`")
 
                 if files:
                     for f in files:
@@ -283,9 +286,9 @@ with main_col:
                         <div class="doc-item-card">
                             <div>
                                 <p class="doc-item-title">📄 {f['filename']}</p>
-                                <p class="doc-item-meta">{size_mb} MB • Last Modified: {f.get('last_modified', 'N/A')}</p>
+                                <p class="doc-item-meta">{size_mb} MB • Owner: {f.get('user_id', 'Private')}</p>
                             </div>
-                            <span class="status-badge-green">✔ Stored</span>
+                            <span class="status-badge-green">🔒 Private File</span>
                         </div>
                         """, unsafe_allow_html=True)
 
@@ -295,6 +298,7 @@ with main_col:
                                 with st.spinner(f"Indexing '{f['filename']}'..."):
                                     p_resp = requests.post(f"{BACKEND_URL}/api/process", json={
                                         "filename": f['filename'],
+                                        "user_id": st.session_state.user_id,
                                         "strategy": "recursive",
                                         "chunk_size": 500,
                                         "chunk_overlap": 50
@@ -310,19 +314,21 @@ with main_col:
                                 st.success(f"Deleted '{f['filename']}'!")
                                 st.rerun()
                 else:
-                    st.info("No documents currently found in the Storage Bucket. Upload a PDF using the left sidebar.")
+                    st.info("You haven't uploaded any documents yet. Use '+ Upload New PDF Document' in the sidebar.")
         except Exception as e:
             st.error(f"Error reading Storage Bucket: {e}")
 
-    # VIEW 3: SAVED CHAT HISTORY BROWSER
-    elif st.session_state.active_nav == "🕒 Saved Chat History":
-        st.subheader("🕒 Saved Chat Sessions")
+    # VIEW 3: MY SAVED CHAT HISTORY (Filtered by user_id)
+    elif st.session_state.active_nav == "🕒 My Saved Chat History":
+        st.subheader("🕒 My Saved Chat Sessions")
+        st.caption(f"Showing chat sessions created exclusively by User `{st.session_state.user_id}`")
+
         try:
-            resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=10)
+            resp = requests.get(f"{BACKEND_URL}/api/sessions?user_id={st.session_state.user_id}", timeout=10)
             if resp.status_code == 200:
                 sessions = resp.json()
                 if sessions:
-                    st.caption(f"Total Saved Sessions: `{len(sessions)}`")
+                    st.caption(f"Total Private Sessions: `{len(sessions)}`")
                     for s in sessions:
                         with st.expander(f"💬 Session `{s['session_id']}` | Document: {s['filename']} | {s['message_count']} msgs"):
                             st.markdown(f"**Created At:** `{s['created_at']}`")
@@ -346,7 +352,7 @@ with main_col:
                                             for m in sess_data["messages"]
                                         ]
                                         st.session_state.active_nav = "💬 Chat"
-                                        st.success("Session restored successfully!")
+                                        st.success("Private session restored!")
                                         st.rerun()
                             with col_b:
                                 if st.button(f"🗑️ Delete Session", key=f"hist_del_{s['session_id']}"):
@@ -354,7 +360,7 @@ with main_col:
                                     st.success("Session deleted.")
                                     st.rerun()
                 else:
-                    st.info("No saved chat sessions found in database.")
+                    st.info("No saved private chat sessions found.")
         except Exception as e:
             st.error(f"Failed to fetch session history: {e}")
 
