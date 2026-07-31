@@ -6,7 +6,6 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import uvicorn
 import logging
-import shutil
 import gc
 
 from backend.services.pdf_parser import PDFParser
@@ -17,18 +16,15 @@ from backend.services.history_store import HistoryStore
 from backend.services.storage_bucket import StorageBucketManager
 from backend.services.rag_engine import RAGEngine
 from backend.services.worker_analyzer import analyze_extracted_data
-from backend.config import DEFAULT_SYSTEM_PROMPT, BACKEND_HOST, BACKEND_PORT, DATA_DIR
+from backend.config import DEFAULT_SYSTEM_PROMPT, BACKEND_HOST, BACKEND_PORT
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doc_analyser_backend")
 
-UPLOAD_DIR = DATA_DIR / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
 app = FastAPI(
     title="Document Analyser & Retriever API",
-    description="Memory-optimized RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings, Vector Storage, & Storage Bucket",
-    version="1.5.0"
+    description="S3-Exclusive Storage Bucket RAG Backend with PyMuPDF & Cloudflare Workers AI",
+    version="2.0.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -47,13 +43,13 @@ history_store = HistoryStore()
 storage_bucket = StorageBucketManager()
 rag_engine = RAGEngine(embedding_service=embedding_service, vector_store=vector_store)
 
-# In-memory document buffer cache
+# In-memory document metadata cache
 document_cache: Dict[str, Dict[str, Any]] = {}
 
 # Pydantic Schemas
 class ProcessRequest(BaseModel):
     filename: str
-    strategy: str = "recursive"  # fixed, recursive, page_aware, semantic
+    strategy: str = "recursive"
     chunk_size: int = 500
     chunk_overlap: int = 50
 
@@ -62,7 +58,7 @@ class ChatRequest(BaseModel):
     query: str
     filename: Optional[str] = None
     system_prompt: Optional[str] = DEFAULT_SYSTEM_PROMPT
-    top_k: int = 5
+    top_k: int = 8
     temperature: float = 0.2
     chunk_strategy: Optional[str] = "recursive"
     chunk_size: Optional[int] = 500
@@ -85,17 +81,18 @@ def health_check():
         "bucket_name": storage_bucket.bucket_name
     }
 
-def _save_and_parse_pdf(file: UploadFile) -> Dict[str, Any]:
-    file_path = UPLOAD_DIR / file.filename
+def _save_and_parse_pdf_to_s3(file: UploadFile) -> Dict[str, Any]:
+    """
+    Saves PDF file directly to S3 Storage Bucket and parses text in memory.
+    """
     file.file.seek(0)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    file_bytes = file.file.read()
 
-    with open(file_path, "rb") as f:
-        file_bytes = f.read()
+    # 1. Save directly into S3 Storage Bucket
     bucket_info = storage_bucket.save_file(file.filename, file_bytes)
 
-    parsed_doc = PDFParser.parse_pdf_file(str(file_path), file.filename)
+    # 2. Parse PDF text from bytes directly
+    parsed_doc = PDFParser.parse_pdf_bytes(file_bytes, file.filename)
     parsed_doc["bucket_info"] = bucket_info
     gc.collect()
     return parsed_doc
@@ -103,25 +100,25 @@ def _save_and_parse_pdf(file: UploadFile) -> Dict[str, Any]:
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     """
-    Streams PDF file to disk and parses with low memory footprint (<10MB RAM).
+    Uploads PDF file directly into the S3 Storage Bucket.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     try:
-        parsed_doc = await run_in_threadpool(_save_and_parse_pdf, file)
+        parsed_doc = await run_in_threadpool(_save_and_parse_pdf_to_s3, file)
         document_cache[file.filename] = parsed_doc
 
         return {
-            "message": "PDF uploaded, stored in bucket, and parsed successfully",
+            "message": f"PDF '{file.filename}' uploaded directly to S3 Storage Bucket successfully.",
             "filename": file.filename,
             "bucket_info": parsed_doc.get("bucket_info"),
             "metadata": parsed_doc["metadata"],
             "page_count": len(parsed_doc["pages"])
         }
     except Exception as e:
-        logger.error(f"Upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
+        logger.error(f"S3 Upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"S3 Storage Bucket upload error: {str(e)}")
 
 @app.post("/api/process")
 async def process_chunks(req: ProcessRequest):
@@ -132,7 +129,7 @@ async def process_chunks(req: ProcessRequest):
             parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, file_bytes, filename)
             document_cache[filename] = parsed_doc
         else:
-            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in bucket or memory.")
+            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in S3 Storage Bucket.")
 
     doc_data = document_cache[filename]
     pages_data = doc_data["pages"]
@@ -158,7 +155,7 @@ async def process_chunks(req: ProcessRequest):
     gc.collect()
 
     return {
-        "message": f"Successfully chunked and indexed {len(chunks)} text chunks.",
+        "message": f"Successfully chunked and indexed {len(chunks)} text chunks for '{filename}' in S3 Storage Bucket.",
         "filename": filename,
         "strategy": req.strategy,
         "chunk_count": len(chunks),
@@ -174,7 +171,7 @@ async def analyze_document_endpoint(req: AnalyzeRequest):
             parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, file_bytes, filename)
             document_cache[filename] = parsed_doc
         else:
-            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found.")
+            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in S3 Storage Bucket.")
 
     doc_text = document_cache[filename].get("full_text", "")
     analysis_result = await analyze_extracted_data(
@@ -237,8 +234,8 @@ async def list_bucket_files():
 async def delete_bucket_file(filename: str):
     deleted = await run_in_threadpool(storage_bucket.delete_file, filename)
     if not deleted:
-        raise HTTPException(status_code=404, detail="File not found in storage bucket.")
-    return {"message": f"Deleted '{filename}' from storage bucket."}
+        raise HTTPException(status_code=404, detail="File not found in S3 Storage Bucket.")
+    return {"message": f"Deleted '{filename}' from S3 Storage Bucket."}
 
 @app.get("/api/sessions")
 async def list_sessions():
