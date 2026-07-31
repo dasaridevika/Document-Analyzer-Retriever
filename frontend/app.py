@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import os
 import json
+import uuid
 import datetime
 
 # Page Config
@@ -48,52 +49,25 @@ def load_css():
 
 load_css()
 
-# Session State Initialization
+# Session State Initialization (Isolated Per User / Browser Tab)
+if "user_id" not in st.session_state:
+    st.session_state.user_id = str(uuid.uuid4())[:8]
 if "current_filename" not in st.session_state:
     st.session_state.current_filename = None
 if "doc_metadata" not in st.session_state:
     st.session_state.doc_metadata = None
 if "session_id" not in st.session_state:
-    st.session_state.session_id = None
+    st.session_state.session_id = str(uuid.uuid4())[:8]
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "system_prompt" not in st.session_state:
-    st.session_state.system_prompt = "You are a helpful AI assistant that provides accurate explanations based strictly on the provided documents."
+    st.session_state.system_prompt = "You are an expert AI Document Assistant. Provide accurate, detailed explanations based strictly on the provided document context."
 if "active_nav" not in st.session_state:
     st.session_state.active_nav = "💬 Chat"
 if "top_k" not in st.session_state:
     st.session_state.top_k = 8
-if "history_loaded" not in st.session_state:
-    st.session_state.history_loaded = False
 
-# Auto-Load Recent Saved Chat Session History on Startup
-if not st.session_state.history_loaded:
-    try:
-        s_resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=5)
-        if s_resp.status_code == 200:
-            sessions = s_resp.json()
-            if sessions:
-                latest = sessions[0]
-                target_id = latest["session_id"]
-                sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{target_id}", timeout=5)
-                if sess_resp.status_code == 200:
-                    sess_data = sess_resp.json()
-                    st.session_state.session_id = target_id
-                    st.session_state.current_filename = sess_data["session"]["filename"]
-                    st.session_state.system_prompt = sess_data["session"]["system_prompt"]
-                    st.session_state.messages = [
-                        {
-                            "role": m["role"],
-                            "content": m["content"],
-                            "sources": m.get("sources", [])
-                        }
-                        for m in sess_data["messages"]
-                    ]
-        st.session_state.history_loaded = True
-    except Exception:
-        pass
-
-# --- LEFT SIDEBAR (NAV, BUCKET FILES & SAVED SESSIONS) ---
+# --- LEFT SIDEBAR (NAV, ISOLATED USER SESSION & STORAGE BUCKET FILES) ---
 with st.sidebar:
     col_icon, col_txt = st.columns([0.25, 0.75])
     with col_icon:
@@ -104,14 +78,14 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Health Check Status
+    # Health Check & User Session Badge
     try:
         active_url = get_backend_url()
         h_resp = requests.get(f"{active_url}/api/health", timeout=3)
         if h_resp.status_code == 200:
             h_data = h_resp.json()
             bucket = h_data.get("bucket_name", "Storage Bucket")
-            st.success(f"🟢 Connected | Bucket: `{bucket}`")
+            st.success(f"🟢 User Session `{st.session_state.session_id}` | Bucket: `{bucket}`")
     except Exception:
         st.warning("🟠 Backend Starting...")
 
@@ -123,6 +97,17 @@ with st.sidebar:
         ["💬 Chat", "📥 Upload Document", "📦 Storage Bucket Files", "🕒 Saved Chat History"],
         label_visibility="collapsed"
     )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # New Isolated Chat Session Button
+    if st.button("➕ Start New Isolated Session", use_container_width=True):
+        st.session_state.session_id = str(uuid.uuid4())[:8]
+        st.session_state.messages = []
+        st.session_state.current_filename = None
+        st.session_state.active_nav = "💬 Chat"
+        st.success(f"New session '{st.session_state.session_id}' initialized!")
+        st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -176,20 +161,22 @@ with main_col:
     with h_col2:
         if st.button("🗑️ Clear Chat", key="clear_chat_btn"):
             st.session_state.messages = []
-            st.session_state.session_id = None
+            st.session_state.session_id = str(uuid.uuid4())[:8]
             st.rerun()
 
     st.divider()
 
-    # VIEW 1: MAIN CHATVIEW
+    # VIEW 1: MAIN CHAT VIEW (Isolated Per User Session)
     if st.session_state.active_nav == "💬 Chat" or st.session_state.active_nav == "📥 Upload Document":
         if st.session_state.current_filename:
-            st.info(f"📁 Active Document: **{st.session_state.current_filename}**")
+            st.info(f"📁 Active Document: **{st.session_state.current_filename}** | Session ID: `{st.session_state.session_id}`")
+        else:
+            st.warning("⚠️ No document selected. Select a PDF from the Storage Bucket tab or upload a new PDF.")
 
         chat_container = st.container()
         with chat_container:
             if not st.session_state.messages:
-                st.info("👋 Upload a PDF document and ask any question to start analyzing!")
+                st.info("👋 Upload or select a PDF document and ask any question to start analyzing!")
             else:
                 for msg in st.session_state.messages:
                     role = msg["role"]
@@ -304,7 +291,7 @@ with main_col:
 
                         c1, c2 = st.columns([1, 1])
                         with c1:
-                            if st.button(f"🚀 Load & Analyze '{f['filename']}'", key=f"load_file_{f['filename']}"):
+                            if st.button(f"🚀 Set Active & Analyze '{f['filename']}'", key=f"load_file_{f['filename']}"):
                                 with st.spinner(f"Indexing '{f['filename']}'..."):
                                     p_resp = requests.post(f"{BACKEND_URL}/api/process", json={
                                         "filename": f['filename'],
@@ -315,7 +302,7 @@ with main_col:
                                     if p_resp.status_code == 200:
                                         st.session_state.current_filename = f['filename']
                                         st.session_state.active_nav = "💬 Chat"
-                                        st.success(f"Loaded '{f['filename']}'!")
+                                        st.success(f"'{f['filename']}' set as active document!")
                                         st.rerun()
                         with c2:
                             if st.button(f"🗑️ Delete from Bucket", key=f"del_file_{f['filename']}"):
@@ -329,7 +316,7 @@ with main_col:
 
     # VIEW 3: SAVED CHAT HISTORY BROWSER
     elif st.session_state.active_nav == "🕒 Saved Chat History":
-        st.subheader("🕒 Saved Chat Sessions (Railway Volume)")
+        st.subheader("🕒 Saved Chat Sessions")
         try:
             resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=10)
             if resp.status_code == 200:
@@ -343,7 +330,7 @@ with main_col:
 
                             col_a, col_b = st.columns([1, 1])
                             with col_a:
-                                if st.button(f"📥 Restore Session into Chat", key=f"hist_load_{s['session_id']}"):
+                                if st.button(f"📥 Restore Session '{s['session_id']}'", key=f"hist_load_{s['session_id']}"):
                                     sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{s['session_id']}", timeout=10)
                                     if sess_resp.status_code == 200:
                                         sess_data = sess_resp.json()
