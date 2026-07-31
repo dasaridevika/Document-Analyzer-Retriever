@@ -28,7 +28,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(
     title="Document Analyser & Retriever API",
     description="Memory-optimized RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings, Vector Storage, & Storage Bucket",
-    version="1.4.0"
+    version="1.5.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -87,6 +87,7 @@ def health_check():
 
 def _save_and_parse_pdf(file: UploadFile) -> Dict[str, Any]:
     file_path = UPLOAD_DIR / file.filename
+    file.file.seek(0)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 

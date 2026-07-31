@@ -12,13 +12,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Dynamic Internal Backend Resolver (Detects active internal backend interface)
+# Dynamic Internal Backend Resolver (Detects active internal backend port 8000/8001)
 def get_backend_url() -> str:
     env_url = os.getenv("BACKEND_URL", "").rstrip("/")
+    b_port = os.getenv("BACKEND_PORT", "8000")
+    
     candidates = []
     if env_url:
         candidates.append(env_url)
-    candidates.extend(["http://127.0.0.1:8001", "http://0.0.0.0:8001", "http://localhost:8001"])
+        
+    for port in [b_port, "8000", "8001"]:
+        for host in ["127.0.0.1", "0.0.0.0", "localhost"]:
+            url = f"http://{host}:{port}"
+            if url not in candidates:
+                candidates.append(url)
 
     for candidate in candidates:
         try:
@@ -28,7 +35,7 @@ def get_backend_url() -> str:
         except Exception:
             pass
 
-    return candidates[0] if candidates else "http://127.0.0.1:8001"
+    return f"http://127.0.0.1:{b_port}"
 
 BACKEND_URL = get_backend_url()
 
