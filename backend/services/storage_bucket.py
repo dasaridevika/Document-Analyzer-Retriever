@@ -58,7 +58,7 @@ BACKUP_BUCKET_DIR.mkdir(parents=True, exist_ok=True)
 class StorageBucketManager:
     """
     Railway Bucket S3 Storage & Persistent Volume Manager.
-    Saves PDFs simultaneously to S3 Bucket, /app/storage/bucket/, and /data/bucket/.
+    Uploads PDFs to Railway's S3 Bucket 'recorded-case' and local volume storage.
     """
 
     def __init__(self):
@@ -92,7 +92,7 @@ class StorageBucketManager:
                 logger.error(f"Failed to initialize S3 Bucket client: {e}")
                 self.s3_client = None
         else:
-            logger.info("Operating with Railway volume storage. Files saved to /app/storage and /data.")
+            logger.info("Operating with Railway volume storage. Copy S3 keys from the 'Credentials' tab to upload into 'recorded-case' S3 Bucket.")
 
     def save_file(self, filename: str, content: bytes, content_type: str = "application/pdf") -> Dict[str, Any]:
         s3_uploaded = False
@@ -108,7 +108,7 @@ class StorageBucketManager:
                 logger.info(f"Successfully uploaded '{filename}' to Railway S3 Bucket '{self.bucket_name}'.")
                 s3_uploaded = True
             except Exception as e:
-                logger.warning(f"Could not upload '{filename}' to S3 Bucket '{self.bucket_name}': {e}")
+                logger.error(f"S3 Upload failed for '{filename}': {e}. Please copy your Access Key & Secret Key from the 'Credentials' tab into Railway App Variables.")
 
         # Save copy to primary volume storage
         p_path = PRIMARY_BUCKET_DIR / filename
