@@ -4,38 +4,50 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Railway / S3 Storage Bucket Resolver
+# Helper to sanitize placeholder strings from env variables
+def get_clean_env(key: str, default: str = "") -> str:
+    val = os.getenv(key, default).strip()
+    if not val or "your_" in val.lower() or "placeholder" in val.lower() or "xxx" in val.lower():
+        return ""
+    return val
+
+# Comprehensive Railway Bucket Variable Resolver (Supporting Railway's exact names: BUCKET, ENDPOINT, ACCESS_KEY_ID, SECRET_ACCESS_KEY)
 BUCKET_NAME = (
-    os.getenv("RAILWAY_BUCKET_NAME", "").strip() or
-    os.getenv("BUCKET_NAME", "").strip() or
-    os.getenv("S3_BUCKET_NAME", "").strip() or
-    os.getenv("AWS_STORAGE_BUCKET_NAME", "").strip() or
+    get_clean_env("BUCKET") or
+    get_clean_env("BUCKET_NAME") or
+    get_clean_env("RAILWAY_BUCKET_NAME") or
+    get_clean_env("S3_BUCKET_NAME") or
+    get_clean_env("AWS_STORAGE_BUCKET_NAME") or
     "recorded-case-mw0hrll2-cc"
 )
 
 ACCESS_KEY_ID = (
-    os.getenv("RAILWAY_ACCESS_KEY_ID", "").strip() or
-    os.getenv("ACCESS_KEY_ID", "").strip() or
-    os.getenv("S3_ACCESS_KEY_ID", "").strip() or
-    os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+    get_clean_env("ACCESS_KEY_ID") or
+    get_clean_env("RAILWAY_ACCESS_KEY_ID") or
+    get_clean_env("S3_ACCESS_KEY_ID") or
+    get_clean_env("AWS_ACCESS_KEY_ID") or
+    ""
 )
 
 SECRET_ACCESS_KEY = (
-    os.getenv("RAILWAY_SECRET_ACCESS_KEY", "").strip() or
-    os.getenv("SECRET_ACCESS_KEY", "").strip() or
-    os.getenv("S3_SECRET_ACCESS_KEY", "").strip() or
-    os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
+    get_clean_env("SECRET_ACCESS_KEY") or
+    get_clean_env("RAILWAY_SECRET_ACCESS_KEY") or
+    get_clean_env("S3_SECRET_ACCESS_KEY") or
+    get_clean_env("AWS_SECRET_ACCESS_KEY") or
+    ""
 )
 
 ENDPOINT_URL = (
-    os.getenv("RAILWAY_ENDPOINT_URL", "").strip() or
-    os.getenv("ENDPOINT_URL", "").strip() or
-    os.getenv("S3_ENDPOINT_URL", "").strip() or
-    os.getenv("AWS_ENDPOINT_URL_S3", "").strip() or
-    os.getenv("AWS_ENDPOINT_URL", "").strip()
+    get_clean_env("ENDPOINT") or
+    get_clean_env("ENDPOINT_URL") or
+    get_clean_env("RAILWAY_ENDPOINT_URL") or
+    get_clean_env("S3_ENDPOINT_URL") or
+    get_clean_env("AWS_ENDPOINT_URL_S3") or
+    get_clean_env("AWS_ENDPOINT_URL") or
+    ""
 )
 
-REGION_NAME = os.getenv("RAILWAY_REGION") or os.getenv("S3_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+REGION_NAME = get_clean_env("RAILWAY_REGION") or get_clean_env("S3_REGION") or "us-east-1"
 
 if ENDPOINT_URL and not ENDPOINT_URL.startswith("http://") and not ENDPOINT_URL.startswith("https://"):
     ENDPOINT_URL = f"https://{ENDPOINT_URL}"
@@ -43,12 +55,14 @@ if ENDPOINT_URL and not ENDPOINT_URL.startswith("http://") and not ENDPOINT_URL.
 class StorageBucketManager:
     """
     Exclusive S3 Storage Bucket Manager.
-    Saves and manages uploaded documents strictly inside the S3 Storage Bucket.
+    Directly connects using Railway's exact environment variables (BUCKET, ENDPOINT, ACCESS_KEY_ID, SECRET_ACCESS_KEY).
     """
 
     def __init__(self):
         self.bucket_name = BUCKET_NAME
         self.s3_client = None
+
+        logger.info(f"Connecting to Railway Storage Bucket '{self.bucket_name}' via endpoint '{ENDPOINT_URL or 'Default'}'...")
 
         if ACCESS_KEY_ID and SECRET_ACCESS_KEY:
             try:
@@ -68,16 +82,16 @@ class StorageBucketManager:
                     b_list = [b["Name"] for b in buckets_resp.get("Buckets", [])]
                     if b_list:
                         self.bucket_name = b_list[0]
-                        logger.info(f"Auto-detected S3 Bucket name: '{self.bucket_name}'")
+                        logger.info(f"Auto-detected Railway Storage Bucket name: '{self.bucket_name}'")
                 except Exception as b_err:
                     logger.warning(f"Could not list S3 buckets: {b_err}")
 
-                logger.info(f"Initialized Exclusive S3 Storage Bucket client for '{self.bucket_name}'.")
+                logger.info(f"Successfully initialized S3 Storage Bucket client for '{self.bucket_name}'.")
             except Exception as e:
                 logger.error(f"Failed to initialize S3 Bucket client: {e}")
                 self.s3_client = None
         else:
-            logger.info(f"S3 Credentials pending. Set RAILWAY_ACCESS_KEY_ID, RAILWAY_SECRET_ACCESS_KEY, RAILWAY_ENDPOINT_URL in Railway Variables to write directly to S3 Bucket '{self.bucket_name}'.")
+            logger.warning("S3 Credentials pending. ACCESS_KEY_ID or SECRET_ACCESS_KEY is empty.")
 
     def save_file(self, filename: str, content: bytes, content_type: str = "application/pdf") -> Dict[str, Any]:
         """
@@ -91,7 +105,7 @@ class StorageBucketManager:
                     Body=content,
                     ContentType=content_type
                 )
-                logger.info(f"Successfully saved '{filename}' exclusively to S3 Storage Bucket '{self.bucket_name}'.")
+                logger.info(f"Successfully saved '{filename}' directly to S3 Storage Bucket '{self.bucket_name}'.")
                 return {
                     "storage_type": f"S3 Storage Bucket ({self.bucket_name})",
                     "bucket_name": self.bucket_name,
@@ -103,7 +117,7 @@ class StorageBucketManager:
                 logger.error(f"S3 Bucket Upload error for '{filename}': {e}")
                 raise RuntimeError(f"Failed to upload '{filename}' to S3 Storage Bucket: {str(e)}")
 
-        raise RuntimeError("S3 Storage Bucket client is not configured. Please add RAILWAY_ACCESS_KEY_ID, RAILWAY_SECRET_ACCESS_KEY, and RAILWAY_ENDPOINT_URL in Railway Variables.")
+        raise RuntimeError("S3 Storage Bucket client is not configured. Check ACCESS_KEY_ID and SECRET_ACCESS_KEY.")
 
     def get_file(self, filename: str) -> Optional[bytes]:
         """
