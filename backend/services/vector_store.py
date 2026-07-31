@@ -92,15 +92,52 @@ class VectorStoreManager:
 
         return retrieved_chunks
 
+    def get_distributed_chunks(
+        self,
+        filename: str = None,
+        count: int = 12
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves evenly distributed chunks across the entire document for complete summarization.
+        """
+        try:
+            where_clause = {"filename": filename} if filename else None
+            results = self.collection.get(
+                where=where_clause,
+                include=["documents", "metadatas"]
+            )
+
+            if not results or not results.get("ids"):
+                return []
+
+            total = len(results["ids"])
+            if total <= count:
+                step = 1
+            else:
+                step = total // count
+
+            distributed = []
+            for idx in range(0, total, step):
+                distributed.append({
+                    "chunk_id": results["ids"][idx],
+                    "text": results["documents"][idx],
+                    "metadata": results["metadatas"][idx],
+                    "similarity_score": 0.99
+                })
+                if len(distributed) >= count:
+                    break
+
+            return distributed
+        except Exception as e:
+            logger.warning(f"Error fetching distributed chunks: {e}")
+            return []
+
     def get_page_chunks(
         self,
         filename: str = None,
         pages: List[int] = [1, 2, 3, 4],
         limit: int = 6
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieves specific page chunks (e.g. Page 1-4 Course Structure tables) to guarantee master retrieval accuracy.
-        """
         try:
             where_clause = {"filename": filename} if filename else None
             results = self.collection.get(

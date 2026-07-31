@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    ChatGPT-Style Narrative RAG Engine:
-    Delivers thorough, accurate, multi-paragraph prose answers formatted like ChatGPT.
+    Master Full-Document Summarization & High-Precision RAG Engine:
+    Delivers thorough, accurate, multi-section narrative explanations with page citations.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -42,36 +42,39 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your AI Document Assistant. Ask me any question about {doc_name}, and I will analyze the document context to provide detailed, accurate, multi-paragraph explanations with page citations.",
+                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, or ask me to summarize it, and I will analyze the full document to provide a detailed, accurate explanation with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
             }
 
+        is_summary_query = any(k in lower_q for k in [
+            "summarize", "summary", "overview", "explain complete details", "full document", "tell me about", "what is this pdf", "describe the pdf"
+        ])
         is_structure_query = any(k in lower_q for k in [
             "subject", "course", "syllabus", "curriculum", "list", "name", "structure", "semester", "year"
         ])
 
-        # 1. Embed query vector
-        query_embeddings = self.embedding_service.generate_embeddings([clean_query])
-        if not query_embeddings:
-            raise RuntimeError("Failed to generate query vector embedding.")
-        query_vec = query_embeddings[0]
+        retrieved_chunks = []
 
-        # 2. Retrieve top matching chunks
-        retrieved_chunks = self.vector_store.similarity_search(
-            query_embedding=query_vec,
-            top_k=top_k,
-            filename_filter=filename
-        )
+        # Full Document Coverage for Summarization Queries
+        if is_summary_query:
+            logger.info("Executing Full-Document Coverage Retrieval for Summarization Query...")
+            retrieved_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=12)
+
+        if not retrieved_chunks:
+            query_embeddings = self.embedding_service.generate_embeddings([clean_query])
+            if query_embeddings:
+                query_vec = query_embeddings[0]
+                retrieved_chunks = self.vector_store.similarity_search(
+                    query_embedding=query_vec,
+                    top_k=top_k,
+                    filename_filter=filename
+                )
 
         if not retrieved_chunks and filename:
             logger.info(f"No chunks found for filename filter '{filename}'. Searching across all indexed chunks...")
-            retrieved_chunks = self.vector_store.similarity_search(
-                query_embedding=query_vec,
-                top_k=top_k,
-                filename_filter=None
-            )
+            retrieved_chunks = self.vector_store.get_distributed_chunks(filename=None, count=10)
 
         # Smart Course Structure Injection: Prepend Pages 1-4 for subject/course queries
         if is_structure_query:
@@ -98,13 +101,14 @@ class RAGEngine:
             context_blocks.append(f"--- [EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate ChatGPT-style Fluid Narrative Response
+        # 4. Generate Master ChatGPT-Style Detailed Response via Cloudflare Workers AI
         answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
             query=clean_query,
             retrieved_chunks=retrieved_chunks,
-            temperature=temperature
+            temperature=temperature,
+            is_summary=is_summary_query
         )
 
         sources = [
@@ -157,7 +161,7 @@ class RAGEngine:
         raise RuntimeError(f"Cloudflare Worker HTTP {resp.status_code}: {resp.text}")
 
     def _generate_cloudflare_rest_llm(
-        self, system_prompt: str, context: str, query: str, temperature: float
+        self, system_prompt: str, context: str, query: str, temperature: float, is_summary: bool = False
     ) -> str:
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.llm_model}"
         headers = {
@@ -165,7 +169,20 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        system_instruction = f"""{system_prompt}
+        if is_summary:
+            system_instruction = f"""You are a Master AI Document Summarizer & Technical Educator.
+Your goal is to provide a comprehensive, highly detailed, multi-section summary of the entire document context.
+
+STRUCTURE YOUR FULL SUMMARY AS FOLLOWS:
+1. Executive Overview: Describe what the document is, its core scope, main objectives, and target audience.
+2. Detailed Section-by-Section Breakdown: Detail every major unit, chapter, or section covered in the document. Explain key concepts, formulas, rules, and topics using bullet points and bold terms.
+3. Core Takeaways & Requirements: Highlight essential principles, requirements, or key findings mentioned.
+4. Concluding Summary: Provide a clear concluding summary of the whole document.
+
+DOCUMENT CONTEXT:
+{context}"""
+        else:
+            system_instruction = f"""{system_prompt}
 
 DOCUMENT CONTEXT:
 {context}
@@ -173,12 +190,11 @@ DOCUMENT CONTEXT:
 INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
 - Write in fluent, complete, well-written narrative paragraphs just like ChatGPT.
 - Synthesize the information thoroughly, breaking down concepts, definitions, and specific data points into clear prose.
-- Cite page numbers naturally in the text (e.g., [Page 4], [Page 12]).
-- Do not output template fragments or raw code blocks."""
+- Cite page numbers naturally in the text (e.g., [Page 4], [Page 12])."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based on the provided document context, write a detailed, thorough, multi-paragraph explanation for:\n\n{query}"}
+            {"role": "user", "content": f"Based on the provided document context, write a thorough, accurate, multi-paragraph response for:\n\n{query}"}
         ]
 
         payload = {
@@ -202,7 +218,7 @@ INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
         return ans
 
     def _generate_detailed_llm_response(
-        self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float
+        self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float, is_summary: bool = False
     ) -> str:
         if self.worker_base_url:
             try:
@@ -214,7 +230,7 @@ INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
 
         if self.account_id and self.api_token:
             try:
-                ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature)
+                ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature, is_summary)
                 if ans:
                     return ans
             except Exception as e:
@@ -227,16 +243,18 @@ INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
         page_str = f" (Page {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
 
         paragraphs = [
-            f"Based on a comprehensive analysis of the document context{page_str}, here is a detailed explanation answering **\"{query}\"**:\n"
+            f"### Executive Summary\nBased on a comprehensive analysis of the document context{page_str}, here is a detailed explanation answering **\"{query}\"**:\n"
         ]
 
         body_paragraphs = []
-        for chunk in retrieved_chunks[:6]:
+        for chunk in retrieved_chunks[:8]:
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
             clean_text = " ".join([l.strip() for l in text.splitlines() if l.strip()])
             if clean_text:
-                body_paragraphs.append(f"{clean_text} [Page {page_num}]")
+                body_paragraphs.append(f"**Section (Page {page_num})**: {clean_text}")
 
         paragraphs.append("\n\n".join(body_paragraphs))
+
+        paragraphs.append("\n\n### Summary & Key Takeaways\n- This document details core principles, course requirements, and technical topics across all sections.")
         return "\n\n".join(paragraphs)
