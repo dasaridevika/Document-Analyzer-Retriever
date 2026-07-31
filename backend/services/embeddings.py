@@ -14,10 +14,9 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     """
-    Bulletproof Embedding generator:
-    1. Cloudflare Worker AI (@cf/baai/bge-large-en-v1.5)
-    2. Direct Cloudflare REST API with Account ID & Token
-    3. Zero-dependency Hashing Vectorizer fallback (Guarantees zero 500 errors)
+    Priority 1: Your Cloudflare Worker AI URL Link
+    Priority 2: Direct Cloudflare REST API (Optional)
+    Priority 3: Fast Zero-Dependency Vector Hashing Fallback
     """
 
     def __init__(self):
@@ -30,7 +29,7 @@ class EmbeddingService:
         if not texts:
             return []
 
-        # Option 1: Cloudflare Worker AI Endpoint
+        # Priority 1: Use your Cloudflare Worker AI URL Link!
         if self.worker_url:
             try:
                 response = requests.post(self.worker_url, json={"text": texts}, timeout=30)
@@ -38,20 +37,20 @@ class EmbeddingService:
                     data = response.json()
                     vectors = data.get("data") or data.get("result", {}).get("data")
                     if vectors and len(vectors) == len(texts):
-                        logger.info("Generated embeddings via Cloudflare Worker AI.")
+                        logger.info("Successfully generated embeddings via Cloudflare Worker AI link.")
                         return vectors
             except Exception as e:
-                logger.warning(f"Cloudflare Worker embedding endpoint failed: {e}")
+                logger.warning(f"Cloudflare Worker AI link embedding call failed: {e}")
 
-        # Option 2: Direct Cloudflare REST API with Account ID & Token
+        # Priority 2: Direct Cloudflare REST API (Only if real Account ID & Token set)
         if self.account_id and self.api_token:
             try:
                 return self._generate_cloudflare_rest_embeddings(texts)
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API embedding failed: {e}")
 
-        # Option 3: Guaranteed Zero-Dependency Hashing Embedding Fallback
-        logger.info("Using lightweight zero-dependency Hashing embedding fallback...")
+        # Priority 3: Zero-Dependency Hashing Embedding Fallback
+        logger.info("Using lightweight zero-dependency Hashing vector fallback...")
         return [self._hash_embedding(t) for t in texts]
 
     def _generate_cloudflare_rest_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -84,21 +83,15 @@ class EmbeddingService:
 
     @staticmethod
     def _hash_embedding(text: str, dim: int = 384) -> List[float]:
-        """
-        Computes a normalized 384-dimensional hashing vector for text.
-        Guarantees fast semantic vector similarity without requiring external ML dependencies.
-        """
         words = text.lower().split()
         vector = [0.0] * dim
         
         for word in words:
-            # MD5 hash bucket index
             h = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16)
             idx = h % dim
             val = 1.0 if (h & 1) else -1.0
             vector[idx] += val
 
-        # L2 Normalization
         norm = math.sqrt(sum(x * x for x in vector))
         if norm > 0:
             vector = [round(x / norm, 5) for x in vector]
