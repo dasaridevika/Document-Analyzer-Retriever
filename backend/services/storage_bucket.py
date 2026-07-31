@@ -2,11 +2,10 @@ import os
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from backend.config import DATA_DIR, get_clean_env
+from backend.config import DATA_DIR, BACKUP_DATA_DIR, get_clean_env
 
 logger = logging.getLogger(__name__)
 
-# Comprehensive Railway Bucket & S3 Environment Variable Resolver (Sanitized)
 BUCKET_NAME = (
     get_clean_env("AWS_STORAGE_BUCKET_NAME") or
     get_clean_env("RAILWAY_BUCKET_NAME") or
@@ -49,13 +48,17 @@ REGION_NAME = os.getenv("S3_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-e
 if ENDPOINT_URL and not ENDPOINT_URL.startswith("http://") and not ENDPOINT_URL.startswith("https://"):
     ENDPOINT_URL = f"https://{ENDPOINT_URL}"
 
-LOCAL_BUCKET_DIR = DATA_DIR / "bucket"
-LOCAL_BUCKET_DIR.mkdir(parents=True, exist_ok=True)
+# Directories
+PRIMARY_BUCKET_DIR = DATA_DIR / "bucket"
+PRIMARY_BUCKET_DIR.mkdir(parents=True, exist_ok=True)
+
+BACKUP_BUCKET_DIR = BACKUP_DATA_DIR / "bucket"
+BACKUP_BUCKET_DIR.mkdir(parents=True, exist_ok=True)
 
 class StorageBucketManager:
     """
-    Railway Bucket S3 Storage Bucket Manager.
-    Automatically detects exact Railway S3 Bucket names or falls back cleanly to Railway Volume.
+    Railway Bucket S3 Storage & Persistent Volume Manager.
+    Saves PDFs simultaneously to S3 Bucket, /app/storage/bucket/, and /data/bucket/.
     """
 
     def __init__(self):
@@ -75,7 +78,6 @@ class StorageBucketManager:
 
                 self.s3_client = boto3.client("s3", **client_kwargs)
                 
-                # Try auto-detecting bucket name
                 try:
                     buckets_resp = self.s3_client.list_buckets()
                     b_list = [b["Name"] for b in buckets_resp.get("Buckets", [])]
@@ -90,7 +92,7 @@ class StorageBucketManager:
                 logger.error(f"Failed to initialize S3 Bucket client: {e}")
                 self.s3_client = None
         else:
-            logger.info("Operating with Railway volume storage (/data/bucket). Set valid S3 credentials to use external bucket.")
+            logger.info("Operating with Railway volume storage. Files saved to /app/storage and /data.")
 
     def save_file(self, filename: str, content: bytes, content_type: str = "application/pdf") -> Dict[str, Any]:
         s3_uploaded = False
@@ -106,19 +108,25 @@ class StorageBucketManager:
                 logger.info(f"Successfully uploaded '{filename}' to Railway S3 Bucket '{self.bucket_name}'.")
                 s3_uploaded = True
             except Exception as e:
-                logger.warning(f"Could not upload '{filename}' to S3 Bucket '{self.bucket_name}': {e}. Preserved on Railway Volume.")
+                logger.warning(f"Could not upload '{filename}' to S3 Bucket '{self.bucket_name}': {e}")
 
-        # Always save copy to local volume storage as backup
-        file_path = LOCAL_BUCKET_DIR / filename
-        with open(file_path, "wb") as f:
+        # Save copy to primary volume storage
+        p_path = PRIMARY_BUCKET_DIR / filename
+        with open(p_path, "wb") as f:
+            f.write(content)
+
+        # Save copy to backup volume storage
+        b_path = BACKUP_BUCKET_DIR / filename
+        with open(b_path, "wb") as f:
             f.write(content)
 
         return {
-            "storage_type": f"Railway S3 Bucket ({self.bucket_name})" if s3_uploaded else "Railway Volume Disk",
+            "storage_type": f"Railway S3 Bucket ({self.bucket_name})" if s3_uploaded else f"Railway Persistent Volume ({PRIMARY_BUCKET_DIR})",
             "bucket_name": self.bucket_name or "railway-volume",
             "filename": filename,
             "size_bytes": len(content),
-            "s3_uploaded": s3_uploaded
+            "s3_uploaded": s3_uploaded,
+            "saved_path": str(p_path)
         }
 
     def get_file(self, filename: str) -> Optional[bytes]:
@@ -129,10 +137,11 @@ class StorageBucketManager:
             except Exception as e:
                 logger.warning(f"Error reading '{filename}' from S3 Bucket: {e}")
 
-        file_path = LOCAL_BUCKET_DIR / filename
-        if file_path.exists():
-            with open(file_path, "rb") as f:
-                return f.read()
+        for dir_path in [PRIMARY_BUCKET_DIR, BACKUP_BUCKET_DIR]:
+            f_path = dir_path / filename
+            if f_path.exists():
+                with open(f_path, "rb") as f:
+                    return f.read()
 
         return None
 
@@ -151,16 +160,17 @@ class StorageBucketManager:
             except Exception as e:
                 logger.warning(f"Error listing S3 Bucket files: {e}")
 
-        # Always include local volume files
-        for f in LOCAL_BUCKET_DIR.glob("*.pdf"):
-            if not any(x["filename"] == f.name for x in files):
-                stat = f.stat()
-                files.append({
-                    "filename": f.name,
-                    "size_bytes": stat.st_size,
-                    "last_modified": str(stat.st_mtime),
-                    "storage_type": "Railway Volume Disk"
-                })
+        # Check local volume directories
+        for dir_path in [PRIMARY_BUCKET_DIR, BACKUP_BUCKET_DIR]:
+            for f in dir_path.glob("*.pdf"):
+                if not any(x["filename"] == f.name for x in files):
+                    stat = f.stat()
+                    files.append({
+                        "filename": f.name,
+                        "size_bytes": stat.st_size,
+                        "last_modified": str(stat.st_mtime),
+                        "storage_type": f"Railway Volume ({dir_path})"
+                    })
 
         return files
 
@@ -173,9 +183,10 @@ class StorageBucketManager:
             except Exception as e:
                 logger.warning(f"Failed to delete '{filename}' from S3 Bucket: {e}")
 
-        file_path = LOCAL_BUCKET_DIR / filename
-        if file_path.exists():
-            file_path.unlink()
-            deleted = True
+        for dir_path in [PRIMARY_BUCKET_DIR, BACKUP_BUCKET_DIR]:
+            f_path = dir_path / filename
+            if f_path.exists():
+                f_path.unlink()
+                deleted = True
 
         return deleted
