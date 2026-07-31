@@ -33,7 +33,7 @@ class RAGEngine:
         filename: str = None,
         system_prompt: str = None,
         top_k: int = 8,
-        temperature: float = 0.2
+        temperature: float = 0.1
     ) -> Dict[str, Any]:
         effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         clean_query = query.strip()
@@ -48,6 +48,11 @@ class RAGEngine:
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
             }
+
+        # Check if query asks for Course Structure / Subject Names / Syllabus Table
+        is_structure_query = any(k in lower_q for k in [
+            "subject", "course", "syllabus", "curriculum", "list", "name", "structure", "semester", "year"
+        ])
 
         # 1. Embed query vector using BGE Large / Embedding Service
         query_embeddings = self.embedding_service.generate_embeddings([clean_query])
@@ -69,6 +74,16 @@ class RAGEngine:
                 top_k=top_k,
                 filename_filter=None
             )
+
+        # Smart Course Structure Injection: Prepend Pages 1-4 for subject/course queries
+        if is_structure_query:
+            toc_chunks = self.vector_store.get_page_chunks(filename=filename, pages=[1, 2, 3, 4], limit=4)
+            if toc_chunks:
+                # Merge TOC chunks without duplicating
+                existing_ids = set(c["chunk_id"] for c in retrieved_chunks)
+                for tc in reversed(toc_chunks):
+                    if tc["chunk_id"] not in existing_ids:
+                        retrieved_chunks.insert(0, tc)
 
         if not retrieved_chunks:
             return {
@@ -116,9 +131,6 @@ class RAGEngine:
     def _generate_cloudflare_worker_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
-        """
-        Sends payload directly to Cloudflare Worker AI link
-        """
         target_url = self.worker_base_url
         if not target_url:
             raise ValueError("Worker base URL is not set.")
@@ -162,14 +174,14 @@ DOCUMENT CONTEXT:
 {context}
 
 INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
-1. Direct Executive Summary: Start with a clear 2-3 sentence core answer to the query.
-2. Detailed In-Depth Breakdown: Provide thorough, multi-paragraph explanations. Break down key concepts, formulas, definitions, steps, or principles mentioned in the document. Use bold terms and bullet points.
-3. Explicit Page Citations: Cite the exact page numbers (e.g. [Page 4], [Page 12]) where each fact originates.
+1. Direct Executive Summary: Start with a clear core answer listing the exact subject names requested.
+2. Detailed In-Depth Breakdown: Group subject names by Year and Semester clearly. Use bold terms and bullet points.
+3. Explicit Page Citations: Cite exact page numbers (e.g. [Page 1], [Page 2]).
 4. Accuracy Requirement: Base your answer strictly on the provided document excerpts without making up unverified information."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based on the provided document excerpts, please provide an exact and detailed explanation for:\n\n{query}"}
+            {"role": "user", "content": f"Based on the provided document excerpts, please provide an exact and detailed list for:\n\n{query}"}
         ]
 
         payload = {
@@ -195,7 +207,6 @@ INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
-        # 1. Try Cloudflare Worker URL Link first
         if self.worker_base_url:
             try:
                 ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
@@ -204,7 +215,6 @@ INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
             except Exception as e:
                 logger.warning(f"Cloudflare Worker AI link call failed: {e}")
 
-        # 2. Try Direct Cloudflare REST API (if real Account ID & Token set)
         if self.account_id and self.api_token:
             try:
                 ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature)
@@ -213,7 +223,7 @@ INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # 3. Master Detailed Synthesizer Fallback
+        # Master Detailed Synthesizer Fallback
         pages_referenced = sorted(list(set([
             c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
         ])))
@@ -223,7 +233,7 @@ INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
             f"### Executive Summary\nBased on a detailed analysis of the document context{page_str}, here is a comprehensive breakdown for **\"{query}\"**:\n"
         ]
 
-        for idx, chunk in enumerate(retrieved_chunks[:5]):
+        for idx, chunk in enumerate(retrieved_chunks[:6]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
             lines = [l.strip() for l in text.splitlines() if l.strip()]
