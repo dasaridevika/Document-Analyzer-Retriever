@@ -49,6 +49,17 @@ with st.sidebar:
     st.caption("Cloudflare Workers AI, RAG & Storage Bucket Engine")
     st.divider()
 
+    # System Health Badge
+    try:
+        h_resp = requests.get(f"{BACKEND_URL}/api/health", timeout=3)
+        if h_resp.status_code == 200:
+            h_data = h_resp.json()
+            st.success(f"🟢 Connected | Vector Chunks: `{h_data.get('vector_store_stats', {}).get('total_chunks', 0)}`")
+    except Exception:
+        st.warning("🟠 Backend Starting / Offline")
+
+    st.divider()
+
     # System Prompt Presets
     st.subheader("⚙️ System Prompt Customizer")
     preset = st.selectbox(
@@ -252,6 +263,17 @@ with tab2:
     </div>
     """, unsafe_allow_html=True)
 
+    # Active Document & Multi-Document Selector
+    try:
+        b_files_resp = requests.get(f"{BACKEND_URL}/api/bucket/files", timeout=3)
+        if b_files_resp.status_code == 200:
+            file_list = [f["filename"] for f in b_files_resp.json().get("files", [])]
+            if file_list:
+                selected_doc = st.selectbox("📁 Select Active Document for Chat:", file_list, index=0 if st.session_state.current_filename not in file_list else file_list.index(st.session_state.current_filename))
+                st.session_state.current_filename = selected_doc
+    except Exception:
+        pass
+
     if st.session_state.current_filename:
         st.info(f"📁 Active Document: **{st.session_state.current_filename}**")
     else:
@@ -322,6 +344,21 @@ with tab2:
                         st.error(f"Chat API error: {resp.text}")
                 except Exception as e:
                     st.error(f"Failed to connect to backend server: {e}")
+
+    # Export Chat Transcript Button
+    if st.session_state.messages:
+        st.divider()
+        transcript_text = f"# Chat Transcript - {st.session_state.current_filename or 'Document'}\n\n"
+        for m in st.session_state.messages:
+            transcript_text += f"### {m['role'].upper()}:\n{m['content']}\n\n"
+
+        st.download_button(
+            label="📥 Export Chat Transcript (Markdown)",
+            data=transcript_text,
+            file_name=f"chat_transcript_{st.session_state.session_id or 'session'}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
 
 # --- TAB 3: STORAGE BUCKET MANAGER ---
 with tab3:
