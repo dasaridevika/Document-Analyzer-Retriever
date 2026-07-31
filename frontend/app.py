@@ -63,6 +63,35 @@ if "active_nav" not in st.session_state:
     st.session_state.active_nav = "Chat"
 if "top_k" not in st.session_state:
     st.session_state.top_k = 5
+if "history_loaded" not in st.session_state:
+    st.session_state.history_loaded = False
+
+# Auto-Load Recent Saved Chat Session History on Startup
+if not st.session_state.history_loaded:
+    try:
+        s_resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=5)
+        if s_resp.status_code == 200:
+            sessions = s_resp.json()
+            if sessions:
+                latest = sessions[0]
+                target_id = latest["session_id"]
+                sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{target_id}", timeout=5)
+                if sess_resp.status_code == 200:
+                    sess_data = sess_resp.json()
+                    st.session_state.session_id = target_id
+                    st.session_state.current_filename = sess_data["session"]["filename"]
+                    st.session_state.system_prompt = sess_data["session"]["system_prompt"]
+                    st.session_state.messages = [
+                        {
+                            "role": m["role"],
+                            "content": m["content"],
+                            "sources": m.get("sources", [])
+                        }
+                        for m in sess_data["messages"]
+                    ]
+        st.session_state.history_loaded = True
+    except Exception:
+        pass
 
 # --- LEFT SIDEBAR (NAV & UPLOADED DOCS) ---
 with st.sidebar:
@@ -82,7 +111,8 @@ with st.sidebar:
         h_resp = requests.get(f"{active_url}/api/health", timeout=3)
         if h_resp.status_code == 200:
             h_data = h_resp.json()
-            st.success(f"🟢 Backend Online (`{active_url}`)")
+            bucket = h_data.get("bucket_name", "Storage Bucket")
+            st.success(f"🟢 Connected | Bucket: `{bucket}`")
     except Exception:
         st.warning("🟠 Backend Starting...")
 
@@ -102,7 +132,6 @@ with st.sidebar:
     if st.session_state.current_filename:
         meta = st.session_state.doc_metadata or {}
         pages = meta.get("total_pages", "12")
-        words = meta.get("total_words", 0)
         size_mb = round(meta.get("total_chars", 1200000) / 1000000, 1)
 
         st.markdown(f"""
@@ -111,7 +140,7 @@ with st.sidebar:
                 <p class="doc-item-title">📄 {st.session_state.current_filename}</p>
                 <p class="doc-item-meta">{pages} pages • {size_mb if size_mb > 0 else 1.2} MB</p>
             </div>
-            <span class="status-badge-green">✔</span>
+            <span class="status-badge-green">✔ Saved</span>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -122,7 +151,7 @@ with st.sidebar:
         uploaded_file = st.file_uploader("Choose PDF", type=["pdf"], label_visibility="collapsed")
         if uploaded_file is not None:
             if st.button("Submit & Index PDF", use_container_width=True):
-                with st.spinner("Processing document..."):
+                with st.spinner("Saving to Storage Bucket & Indexing PDF..."):
                     try:
                         target_backend = get_backend_url()
                         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
@@ -140,7 +169,8 @@ with st.sidebar:
                                 "chunk_overlap": 50
                             }, timeout=180)
                             if proc_resp.status_code == 200:
-                                st.success(f"'{up_data['filename']}' indexed successfully!")
+                                b_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
+                                st.success(f"'{up_data['filename']}' saved in '{b_type}' and indexed!")
                                 st.rerun()
                             else:
                                 st.error(f"Processing error: {proc_resp.text}")
@@ -165,6 +195,7 @@ with main_col:
     with h_col2:
         if st.button("🗑️ Clear Chat", key="clear_chat_btn"):
             st.session_state.messages = []
+            st.session_state.session_id = None
             st.rerun()
 
     st.divider()
@@ -194,7 +225,7 @@ with main_col:
                 else:
                     sources_html = ""
                     if sources:
-                        for s in sources[:2]:
+                        for s in sources[:3]:
                             pg = s.get("page_number", 1)
                             sources_html += f"""<div class="source-pill">📄 Source: Page {pg}</div> """
 
@@ -232,9 +263,9 @@ with main_col:
                 "filename": st.session_state.current_filename,
                 "system_prompt": st.session_state.system_prompt,
                 "top_k": st.session_state.top_k,
-                "temperature": 0.2
+                "temperature": 0.3
             }
-            resp = requests.post(f"{target_backend}/api/chat", json=chat_payload, timeout=60)
+            resp = requests.post(f"{target_backend}/api/chat", json=chat_payload, timeout=90)
             if resp.status_code == 200:
                 data = resp.json()
                 st.session_state.session_id = data["session_id"]
@@ -311,3 +342,38 @@ with right_col:
         label_visibility="collapsed"
     )
     st.session_state.top_k = top_k_val
+
+    # 4. View Saved Session History List in Right Sidebar
+    if nav == "🕒 History":
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("""
+        <div class="custom-card">
+            <p class="card-title">🕒 Saved Chat Sessions</p>
+        </div>
+        """, unsafe_allow_html=True)
+        try:
+            s_resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=5)
+            if s_resp.status_code == 200:
+                saved_sessions = s_resp.json()
+                if saved_sessions:
+                    for s in saved_sessions:
+                        if st.button(f"📄 {s['filename']} ({s['session_id']})", key=f"hist_{s['session_id']}", use_container_width=True):
+                            sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{s['session_id']}", timeout=5)
+                            if sess_resp.status_code == 200:
+                                sess_data = sess_resp.json()
+                                st.session_state.session_id = s['session_id']
+                                st.session_state.current_filename = sess_data["session"]["filename"]
+                                st.session_state.system_prompt = sess_data["session"]["system_prompt"]
+                                st.session_state.messages = [
+                                    {
+                                        "role": m["role"],
+                                        "content": m["content"],
+                                        "sources": m.get("sources", [])
+                                    }
+                                    for m in sess_data["messages"]
+                                ]
+                                st.rerun()
+                else:
+                    st.caption("No saved sessions.")
+        except Exception:
+            pass
