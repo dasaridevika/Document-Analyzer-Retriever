@@ -12,8 +12,25 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Backend URL Configuration
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001").rstrip("/")
+# Dynamic Internal Backend Resolver (Detects active internal backend interface)
+def get_backend_url() -> str:
+    env_url = os.getenv("BACKEND_URL", "").rstrip("/")
+    candidates = []
+    if env_url:
+        candidates.append(env_url)
+    candidates.extend(["http://127.0.0.1:8001", "http://0.0.0.0:8001", "http://localhost:8001"])
+
+    for candidate in candidates:
+        try:
+            r = requests.get(f"{candidate}/api/health", timeout=1)
+            if r.status_code == 200:
+                return candidate
+        except Exception:
+            pass
+
+    return candidates[0] if candidates else "http://127.0.0.1:8001"
+
+BACKEND_URL = get_backend_url()
 
 # Load Custom CSS
 def load_css():
@@ -49,6 +66,18 @@ with st.sidebar:
     with col_txt:
         st.markdown("<h3 style='margin:0; font-weight:700; color:#0F172A;'>DocAnalyzer</h3>", unsafe_allow_html=True)
         st.markdown("<p style='margin:0; font-size:0.75rem; color:#64748B;'>Document Analyzer & Retriever</p>", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Health Check Status
+    try:
+        active_url = get_backend_url()
+        h_resp = requests.get(f"{active_url}/api/health", timeout=3)
+        if h_resp.status_code == 200:
+            h_data = h_resp.json()
+            st.success(f"🟢 Backend Online (`{active_url}`)")
+    except Exception:
+        st.warning("🟠 Backend Starting...")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -88,27 +117,32 @@ with st.sidebar:
             if st.button("Submit & Index PDF", use_container_width=True):
                 with st.spinner("Processing document..."):
                     try:
+                        target_backend = get_backend_url()
                         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-                        up_resp = requests.post(f"{BACKEND_URL}/api/upload", files=files, timeout=120)
+                        up_resp = requests.post(f"{target_backend}/api/upload", files=files, timeout=180)
                         if up_resp.status_code == 200:
                             up_data = up_resp.json()
                             st.session_state.current_filename = up_data["filename"]
                             st.session_state.doc_metadata = up_data["metadata"]
 
                             # Process chunking
-                            proc_resp = requests.post(f"{BACKEND_URL}/api/process", json={
+                            proc_resp = requests.post(f"{target_backend}/api/process", json={
                                 "filename": up_data["filename"],
                                 "strategy": "recursive",
                                 "chunk_size": 500,
                                 "chunk_overlap": 50
-                            }, timeout=120)
+                            }, timeout=180)
                             if proc_resp.status_code == 200:
                                 st.success(f"'{up_data['filename']}' indexed successfully!")
                                 st.rerun()
+                            else:
+                                st.error(f"Processing error: {proc_resp.text}")
+                        else:
+                            st.error(f"Upload error: {up_resp.text}")
                     except Exception as e:
-                        st.error(f"Upload error: {e}")
+                        st.error(f"Upload connection error: {e}")
 
-    st.markdown("<br><br><br>", unsafe_allow_html=True)
+    st.markdown("<br><br>", unsafe_allow_html=True)
     st.markdown("<p style='font-size:0.75rem; color:#94a3b8; text-align:center;'>Made with ❤️ by Devika</p>", unsafe_allow_html=True)
 
 # --- MAIN CONTENT AREA (MIDDLE + RIGHT COLUMNS) ---
@@ -184,6 +218,7 @@ with main_col:
 
         # Submit to RAG Engine
         try:
+            target_backend = get_backend_url()
             chat_payload = {
                 "session_id": st.session_state.session_id,
                 "query": user_input,
@@ -192,7 +227,7 @@ with main_col:
                 "top_k": st.session_state.top_k,
                 "temperature": 0.2
             }
-            resp = requests.post(f"{BACKEND_URL}/api/chat", json=chat_payload, timeout=60)
+            resp = requests.post(f"{target_backend}/api/chat", json=chat_payload, timeout=60)
             if resp.status_code == 200:
                 data = resp.json()
                 st.session_state.session_id = data["session_id"]
