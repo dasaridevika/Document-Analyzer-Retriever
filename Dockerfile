@@ -1,4 +1,4 @@
-# Optimized Dockerfile for Railway Deployment
+# Optimized Dockerfile for Single-Service Railway Deployment (FastAPI + Streamlit)
 FROM python:3.10-slim
 
 WORKDIR /app
@@ -28,5 +28,5 @@ ENV BACKEND_PORT=8001
 
 EXPOSE 8001 8501
 
-# Run Uvicorn backend on port 8001 and Streamlit frontend on Railway's $PORT
-CMD ["sh", "-c", "uvicorn backend.main:app --host 127.0.0.1 --port 8001 & streamlit run frontend/app.py --server.port ${PORT:-8501} --server.address 0.0.0.0"]
+# Entrypoint supervisor manages FastAPI on port 8001 and Streamlit on $PORT
+CMD ["python", "entrypoint.py"]
