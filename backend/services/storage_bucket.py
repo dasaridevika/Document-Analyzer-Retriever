@@ -6,45 +6,49 @@ from backend.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-# Cloudflare R2 / S3 Storage Bucket Credentials
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", os.getenv("S3_BUCKET_NAME", "doc-analyser-bucket"))
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", os.getenv("AWS_ACCESS_KEY_ID", ""))
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", os.getenv("AWS_SECRET_ACCESS_KEY", ""))
-R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", os.getenv("S3_ENDPOINT_URL", ""))
+# AWS S3 / S3-compatible Storage Bucket Credentials (Loaded strictly from service environment variables)
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME") or os.getenv("AWS_STORAGE_BUCKET_NAME") or os.getenv("R2_BUCKET_NAME") or ""
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("R2_ACCESS_KEY_ID") or ""
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY") or os.getenv("R2_SECRET_ACCESS_KEY") or ""
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL") or os.getenv("AWS_ENDPOINT_URL") or os.getenv("R2_ENDPOINT_URL") or None
+AWS_REGION = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "us-east-1"
 
 LOCAL_BUCKET_DIR = DATA_DIR / "bucket"
 LOCAL_BUCKET_DIR.mkdir(parents=True, exist_ok=True)
 
 class StorageBucketManager:
     """
-    Storage Bucket Manager supporting:
-    1. Cloudflare R2 / AWS S3 Storage Buckets (via boto3)
-    2. Local persistent disk fallback (Railway volume storage)
+    AWS S3 & S3-Compatible Storage Bucket Manager.
+    All keys and bucket names are injected strictly via environment variables.
     """
 
     def __init__(self):
-        self.bucket_name = R2_BUCKET_NAME
+        self.bucket_name = S3_BUCKET_NAME
         self.s3_client = None
 
-        if R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_ENDPOINT_URL:
+        if self.bucket_name and AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
             try:
                 import boto3
-                self.s3_client = boto3.client(
-                    "s3",
-                    endpoint_url=R2_ENDPOINT_URL,
-                    aws_access_key_id=R2_ACCESS_KEY_ID,
-                    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-                    region_name="auto"
-                )
-                logger.info(f"Initialized Cloudflare R2 / S3 Storage Bucket client for '{self.bucket_name}'.")
+                client_kwargs = {
+                    "aws_access_key_id": AWS_ACCESS_KEY_ID,
+                    "aws_secret_access_key": AWS_SECRET_ACCESS_KEY,
+                    "region_name": AWS_REGION
+                }
+                if S3_ENDPOINT_URL:
+                    client_kwargs["endpoint_url"] = S3_ENDPOINT_URL
+
+                self.s3_client = boto3.client("s3", **client_kwargs)
+                logger.info(f"Successfully initialized S3 Storage Bucket client for '{self.bucket_name}'.")
             except Exception as e:
-                logger.warning(f"Failed to initialize boto3 S3 client: {e}. Using local volume bucket fallback.")
+                logger.warning(f"Failed to initialize S3 client: {e}. Operating with local volume disk storage.")
+        else:
+            logger.info("No S3 credentials provided in service environment variables. Operating with local volume disk storage.")
 
     def save_file(self, filename: str, content: bytes, content_type: str = "application/pdf") -> Dict[str, Any]:
         """
-        Saves a PDF file to the Cloudflare R2 / S3 Bucket or local volume storage.
+        Saves file to S3 Bucket or local volume disk storage.
         """
-        if self.s3_client:
+        if self.s3_client and self.bucket_name:
             try:
                 self.s3_client.put_object(
                     Bucket=self.bucket_name,
@@ -52,17 +56,15 @@ class StorageBucketManager:
                     Body=content,
                     ContentType=content_type
                 )
-                url = f"{R2_ENDPOINT_URL}/{self.bucket_name}/{filename}"
-                logger.info(f"Uploaded '{filename}' to Cloudflare R2 / S3 Storage Bucket.")
+                logger.info(f"Uploaded '{filename}' to S3 Storage Bucket '{self.bucket_name}'.")
                 return {
-                    "storage_type": "Cloudflare R2 / S3 Bucket",
+                    "storage_type": "AWS S3 / S3-Compatible Bucket",
                     "bucket_name": self.bucket_name,
                     "filename": filename,
-                    "size_bytes": len(content),
-                    "url": url
+                    "size_bytes": len(content)
                 }
             except Exception as e:
-                logger.warning(f"Storage Bucket upload failed: {e}. Falling back to local storage.")
+                logger.warning(f"S3 Storage Bucket upload error: {e}. Saving to local volume storage.")
 
         # Local volume disk storage fallback
         file_path = LOCAL_BUCKET_DIR / filename
@@ -79,14 +81,14 @@ class StorageBucketManager:
 
     def get_file(self, filename: str) -> Optional[bytes]:
         """
-        Retrieves raw PDF file bytes from the bucket or local disk.
+        Retrieves raw file bytes from S3 Bucket or local disk.
         """
-        if self.s3_client:
+        if self.s3_client and self.bucket_name:
             try:
                 resp = self.s3_client.get_object(Bucket=self.bucket_name, Key=filename)
                 return resp["Body"].read()
             except Exception as e:
-                logger.warning(f"Error fetching from S3 bucket: {e}")
+                logger.warning(f"Error fetching '{filename}' from S3 bucket: {e}")
 
         file_path = LOCAL_BUCKET_DIR / filename
         if file_path.exists():
@@ -97,10 +99,10 @@ class StorageBucketManager:
 
     def list_files(self) -> List[Dict[str, Any]]:
         """
-        Lists all PDF files stored in the storage bucket.
+        Lists all files in S3 Bucket or local disk storage.
         """
         files = []
-        if self.s3_client:
+        if self.s3_client and self.bucket_name:
             try:
                 resp = self.s3_client.list_objects_v2(Bucket=self.bucket_name)
                 for obj in resp.get("Contents", []):
@@ -108,7 +110,7 @@ class StorageBucketManager:
                         "filename": obj["Key"],
                         "size_bytes": obj["Size"],
                         "last_modified": obj["LastModified"].isoformat(),
-                        "storage_type": "Cloudflare R2 / S3"
+                        "storage_type": "AWS S3 / S3-Compatible"
                     })
                 return files
             except Exception as e:
@@ -128,10 +130,10 @@ class StorageBucketManager:
 
     def delete_file(self, filename: str) -> bool:
         """
-        Deletes a PDF file from the storage bucket.
+        Deletes a file from S3 Bucket or local disk.
         """
         deleted = False
-        if self.s3_client:
+        if self.s3_client and self.bucket_name:
             try:
                 self.s3_client.delete_object(Bucket=self.bucket_name, Key=filename)
                 deleted = True

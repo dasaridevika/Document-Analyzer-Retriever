@@ -8,14 +8,11 @@ from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Base Worker URL (defaults to user's worker or custom deployment)
-WORKER_BASE_URL = os.getenv(
-    "LLM_ANALYSIS_URL",
-    "https://shrill-smoke-7541.devika-worker.workers.dev"
-).strip().rstrip("/")
+# Base Worker URL (Loaded strictly from service environment variables)
+WORKER_BASE_URL = os.getenv("LLM_ANALYSIS_URL", "").strip().rstrip("/")
 
-WORKER_ANALYZE_URL = f"{WORKER_BASE_URL}/analyze" if not WORKER_BASE_URL.endswith("/analyze") else WORKER_BASE_URL
-WORKER_EMBEDDINGS_URL = f"{WORKER_BASE_URL}/embeddings"
+WORKER_ANALYZE_URL = f"{WORKER_BASE_URL}/analyze" if WORKER_BASE_URL and not WORKER_BASE_URL.endswith("/analyze") else WORKER_BASE_URL
+WORKER_EMBEDDINGS_URL = f"{WORKER_BASE_URL}/embeddings" if WORKER_BASE_URL else ""
 
 MAX_ANALYSIS_CHARS = 12000
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120.0"))
@@ -227,7 +224,6 @@ def _extract_message_content(response_json) -> str:
                 return " ".join(str(item) for item in content).strip()
             return str(content).strip()
 
-        # Check direct Cloudflare Worker AI result format: { response: "..." }
         if "response" in result and isinstance(result["response"], str):
             return result["response"].strip()
 
@@ -306,14 +302,8 @@ def parse_llm_response(response_json) -> dict:
     return _safe_analysis("Model returned invalid JSON.", raw_text)
 
 
-# =========================================================================
-# NEW: Cloudflare Workers AI Embeddings Endpoint Integration (@cf/baai/bge-large-en-v1.5)
-# =========================================================================
 async def generate_bge_embeddings(texts: List[str]) -> List[List[float]]:
-    """
-    Calls Cloudflare Workers AI endpoint to generate vector embeddings using @cf/baai/bge-large-en-v1.5.
-    """
-    if not texts:
+    if not texts or not WORKER_EMBEDDINGS_URL:
         return []
 
     payload = {"text": texts}
@@ -338,9 +328,6 @@ async def generate_bge_embeddings(texts: List[str]) -> List[List[float]]:
         raise RuntimeError(f"Embedding generation error: {str(exc)}")
 
 
-# =========================================================================
-# Document Analysis Function (Calls Cloudflare Worker LLM Analysis)
-# =========================================================================
 async def analyze_extracted_data(
     url: str,
     title: str,
@@ -349,6 +336,9 @@ async def analyze_extracted_data(
 ):
     if not extracted_text or not extracted_text.strip():
         return _safe_analysis("No extracted text available for LLM analysis.")
+
+    if not WORKER_ANALYZE_URL:
+        return _safe_analysis("LLM_ANALYSIS_URL environment variable is not configured.")
 
     raw_len = len(extracted_text)
     cleaned_text = clean_text(extracted_text)
