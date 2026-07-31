@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    High-Quality ChatGPT-Style RAG Engine:
+    High-Precision Master AI RAG Engine:
     Uses Cloudflare Workers AI Llama-3 8B Instruct with BGE Large vectors
-    to deliver rich, detailed, multi-paragraph explanations with page citations.
+    to deliver highly accurate, detailed, step-by-step explanations with page citations.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -32,8 +32,8 @@ class RAGEngine:
         query: str,
         filename: str = None,
         system_prompt: str = None,
-        top_k: int = 5,
-        temperature: float = 0.3
+        top_k: int = 8,
+        temperature: float = 0.2
     ) -> Dict[str, Any]:
         effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         clean_query = query.strip()
@@ -43,7 +43,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your AI Document Assistant. Ask me any question about {doc_name}, and I will analyze the text to provide comprehensive, detailed answers with page citations.",
+                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the document context to provide detailed, accurate explanations with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -83,10 +83,10 @@ class RAGEngine:
         for i, chunk in enumerate(retrieved_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"[Excerpt {i+1} | File: {doc_fname} | Page {page_num}]\n{chunk['text']}")
+            context_blocks.append(f"--- [EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate ChatGPT-style Detailed Response via Cloudflare Workers AI
+        # 4. Generate Master ChatGPT-Style Detailed Response via Cloudflare Workers AI
         answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -116,9 +116,6 @@ class RAGEngine:
     def _generate_cloudflare_rest_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
-        """
-        Calls Cloudflare Workers AI REST API directly (@cf/meta/llama-3-8b-instruct)
-        """
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.llm_model}"
         headers = {
             "Authorization": f"Bearer {self.api_token}",
@@ -130,15 +127,15 @@ class RAGEngine:
 DOCUMENT CONTEXT:
 {context}
 
-INSTRUCTIONS:
-- Provide a detailed, comprehensive, multi-paragraph response like ChatGPT.
-- Use clear Markdown headers, bold terms, and bullet points.
-- Explicitly cite page numbers from the context (e.g. Page 4, Page 12).
-- Base your answer strictly on the provided document excerpts."""
+INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
+1. Direct Executive Summary: Start with a clear 2-3 sentence core answer to the query.
+2. Detailed In-Depth Breakdown: Provide thorough, multi-paragraph explanations. Break down key concepts, formulas, definitions, steps, or principles mentioned in the document. Use bold terms and bullet points.
+3. Explicit Page Citations: Cite the exact page numbers (e.g. [Page 4], [Page 12]) where each fact originates.
+4. Accuracy Requirement: Base your answer strictly on the provided document excerpts without making up unverified information."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": query}
+            {"role": "user", "content": f"Based on the provided document excerpts, please provide an exact and detailed explanation for:\n\n{query}"}
         ]
 
         payload = {
@@ -164,9 +161,6 @@ INSTRUCTIONS:
     def _generate_cloudflare_worker_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
-        """
-        Calls Cloudflare Worker endpoint if LLM_ANALYSIS_URL is set
-        """
         worker_url = f"{self.worker_base_url}/chat" if not self.worker_base_url.endswith("/chat") else self.worker_base_url
         payload = {
             "query": query,
@@ -205,23 +199,23 @@ INSTRUCTIONS:
             except Exception as e:
                 logger.warning(f"Cloudflare Worker LLM call failed: {e}")
 
-        # 3. Comprehensive Detailed Synthesizer Fallback
+        # 3. Master Detailed Synthesizer Fallback
         pages_referenced = sorted(list(set([
             c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
         ])))
         page_str = f" (Page {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
 
         response_sections = [
-            f"Based on a detailed analysis of the document context{page_str}, here is a comprehensive breakdown for **\"{query}\"**:\n"
+            f"### Executive Summary\nBased on a detailed analysis of the document context{page_str}, here is a comprehensive breakdown for **\"{query}\"**:\n"
         ]
 
-        for idx, chunk in enumerate(retrieved_chunks[:4]):
+        for idx, chunk in enumerate(retrieved_chunks[:5]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
             lines = [l.strip() for l in text.splitlines() if l.strip()]
 
             if lines:
-                section_title = lines[0][:80] if len(lines[0]) < 80 else f"Document Analysis - Page {page_num}"
+                section_title = lines[0][:80] if len(lines[0]) < 80 else f"Key Section - Page {page_num}"
                 section_body = "\n".join(lines[1:]) if len(lines) > 1 else lines[0]
 
                 response_sections.append(f"### {idx+1}. {section_title} *(Page {page_num})*\n")
@@ -230,7 +224,7 @@ INSTRUCTIONS:
 
         response_sections.append("### Summary & Key Takeaways\n")
         takeaways = []
-        for c in retrieved_chunks[:3]:
+        for c in retrieved_chunks[:4]:
             snippet = c["text"].strip().replace("\n", " ")
             if len(snippet) > 160:
                 snippet = snippet[:160] + "..."
