@@ -9,7 +9,8 @@ load_dotenv()
 
 def get_clean_env(key: str, default: str = "") -> str:
     val = os.getenv(key, default).strip()
-    if not val or "your_" in val.lower() or "placeholder" in val.lower() or "xxx" in val.lower():
+    # Filter out empty or unreplaced default placeholders
+    if not val or val.lower() in ["none", "null", "undefined"]:
         return ""
     return val
 
@@ -27,7 +28,6 @@ else:
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Also create secondary backup directory at /data if available
 BACKUP_DATA_DIR = Path("/data") if Path("/data").exists() else Path("/app/storage")
 BACKUP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
