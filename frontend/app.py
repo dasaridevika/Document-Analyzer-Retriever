@@ -46,7 +46,7 @@ if "chunks_data" not in st.session_state:
 with st.sidebar:
     st.image("https://img.icons8.com/isometric-folders/100/document-file.png", width=64)
     st.title("DocAnalyser AI")
-    st.caption("Cloudflare Workers AI & RAG Engine")
+    st.caption("Cloudflare Workers AI, RAG & Storage Bucket Engine")
     st.divider()
 
     # System Prompt Presets
@@ -136,29 +136,30 @@ with st.sidebar:
 st.markdown("""
 <div class="main-header">
     <h1>📄 Document Analyser & RAG Retriever</h1>
-    <p>Powered by PyMuPDF PDF Chunking, Cloudflare Workers AI Embeddings (bge-large-en-v1.5), and Persistent Railway Volume Storage.</p>
+    <p>Powered by PyMuPDF PDF Chunking, Cloudflare Workers AI Embeddings (bge-large-en-v1.5), Cloudflare R2 / S3 Storage Bucket, and Persistent Railway Volume Storage.</p>
 </div>
 """, unsafe_allow_html=True)
 
 # TABS NAVIGATION
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📥 1. Upload & Analyze PDF",
     "💬 2. RAG Chatbot",
-    "📚 3. Saved History Browser",
-    "📊 4. Free-Tier Token Monitor"
+    "📦 3. Storage Bucket Manager",
+    "📚 4. Saved History Browser",
+    "📊 5. Free-Tier Token Monitor"
 ])
 
 # --- TAB 1: UPLOAD & CHUNK PDF ---
 with tab1:
-    st.subheader("Upload PDF Document")
+    st.subheader("Upload PDF Document to Storage Bucket")
     uploaded_file = st.file_uploader("Choose a PDF file to analyze:", type=["pdf"])
 
     col1, col2 = st.columns([1, 1])
 
     with col1:
         if uploaded_file is not None:
-            if st.button("🚀 Process & Index Document", type="primary", use_container_width=True):
-                with st.spinner("Extracting text with PyMuPDF..."):
+            if st.button("🚀 Upload to Bucket & Index", type="primary", use_container_width=True):
+                with st.spinner("Saving PDF to Storage Bucket & extracting text..."):
                     # Upload PDF
                     files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
                     up_resp = requests.post(f"{BACKEND_URL}/api/upload", files=files)
@@ -180,7 +181,8 @@ with tab1:
                             if proc_resp.status_code == 200:
                                 proc_data = proc_resp.json()
                                 st.session_state.chunks_data = proc_data.get("sample_chunk", [])
-                                st.success(f"Successfully processed {proc_data['chunk_count']} chunks for '{up_data['filename']}'!")
+                                storage_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
+                                st.success(f"Successfully stored in '{storage_type}' and processed {proc_data['chunk_count']} chunks for '{up_data['filename']}'!")
                             else:
                                 st.error(f"Processing error: {proc_resp.text}")
                     else:
@@ -253,7 +255,7 @@ with tab2:
     if st.session_state.current_filename:
         st.info(f"📁 Active Document: **{st.session_state.current_filename}**")
     else:
-        st.warning("⚠️ No document uploaded yet. You can still ask general questions or upload a PDF in Tab 1.")
+        st.warning("⚠️ No document uploaded yet. You can still ask general questions or select a PDF from the Storage Bucket.")
 
     # Display Message History
     for msg in st.session_state.messages:
@@ -321,8 +323,52 @@ with tab2:
                 except Exception as e:
                     st.error(f"Failed to connect to backend server: {e}")
 
-# --- TAB 3: SAVED HISTORY BROWSER ---
+# --- TAB 3: STORAGE BUCKET MANAGER ---
 with tab3:
+    st.subheader("📦 Cloudflare R2 / Storage Bucket File Browser")
+    try:
+        b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files")
+        if b_resp.status_code == 200:
+            b_data = b_resp.json()
+            bucket_name = b_data.get("bucket_name", "Storage Bucket")
+            files = b_data.get("files", [])
+
+            st.caption(f"Active Storage Bucket: `{bucket_name}` | Total Files: `{len(files)}`")
+
+            if files:
+                for f in files:
+                    with st.expander(f"📄 {f['filename']} ({f['size_bytes']:,} bytes) - {f.get('storage_type', 'Storage')}"):
+                        st.markdown(f"**Last Modified:** `{f.get('last_modified', 'N/A')}`")
+                        st.markdown(f"**Storage Engine:** `{f.get('storage_type', 'Storage')}`")
+
+                        col_x, col_y = st.columns([1, 1])
+                        with col_x:
+                            if st.button("🚀 Load & Process this PDF", key=f"proc_bucket_{f['filename']}"):
+                                with st.spinner(f"Re-indexing '{f['filename']}' from storage bucket..."):
+                                    p_resp = requests.post(f"{BACKEND_URL}/api/process", json={
+                                        "filename": f['filename'],
+                                        "strategy": chunk_strategy,
+                                        "chunk_size": chunk_size,
+                                        "chunk_overlap": chunk_overlap
+                                    })
+                                    if p_resp.status_code == 200:
+                                        st.session_state.current_filename = f['filename']
+                                        st.success(f"'{f['filename']}' loaded from storage bucket and indexed!")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Error loading from bucket: {p_resp.text}")
+                        with col_y:
+                            if st.button("🗑️ Delete from Bucket", key=f"del_bucket_{f['filename']}"):
+                                requests.delete(f"{BACKEND_URL}/api/bucket/files/{f['filename']}")
+                                st.success(f"Deleted '{f['filename']}' from bucket.")
+                                st.rerun()
+            else:
+                st.info("No files currently stored in the storage bucket. Upload a PDF in Tab 1.")
+    except Exception as e:
+        st.error(f"Failed to connect to storage bucket API: {e}")
+
+# --- TAB 4: SAVED HISTORY BROWSER ---
+with tab4:
     st.subheader("📚 Saved Conversations in Railway Storage")
     try:
         resp = requests.get(f"{BACKEND_URL}/api/sessions")
@@ -362,14 +408,15 @@ with tab3:
     except Exception as e:
         st.error(f"Failed to fetch session history: {e}")
 
-# --- TAB 4: TOKEN MONITOR ---
-with tab4:
+# --- TAB 5: TOKEN MONITOR ---
+with tab5:
     st.subheader("📊 Free Tier Token & Neuron Monitor")
     st.markdown("""
     ### Cloudflare Workers AI Free Tier Limits:
     - **Neurons Daily Allowance:** 10,000 Neurons / Day (Free Tier)
     - **Embedding Model:** `@cf/baai/bge-large-en-v1.5` (~1,024 vector dimensions)
     - **LLM Model:** `@cf/meta/llama-3-8b-instruct`
+    - **Storage Bucket:** Cloudflare R2 Free Tier (10 GB storage free, 0 egress fees)
     """)
 
     st.divider()

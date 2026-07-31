@@ -10,6 +10,7 @@ from backend.services.chunker import DocumentChunker
 from backend.services.embeddings import EmbeddingService
 from backend.services.vector_store import VectorStoreManager
 from backend.services.history_store import HistoryStore
+from backend.services.storage_bucket import StorageBucketManager
 from backend.services.rag_engine import RAGEngine
 from backend.services.worker_analyzer import analyze_extracted_data
 from backend.config import DEFAULT_SYSTEM_PROMPT, BACKEND_HOST, BACKEND_PORT
@@ -19,8 +20,8 @@ logger = logging.getLogger("doc_analyser_backend")
 
 app = FastAPI(
     title="Document Analyser & Retriever API",
-    description="RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings (@cf/baai/bge-large-en-v1.5), Vector Storage, & Chat Persistence",
-    version="1.1.0"
+    description="RAG Backend with Cloudflare R2 / S3 Storage Bucket, PyMuPDF, Cloudflare Workers AI Embeddings (@cf/baai/bge-large-en-v1.5), Vector Storage, & Chat Persistence",
+    version="1.2.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -36,6 +37,7 @@ app.add_middleware(
 embedding_service = EmbeddingService()
 vector_store = VectorStoreManager()
 history_store = HistoryStore()
+storage_bucket = StorageBucketManager()
 rag_engine = RAGEngine(embedding_service=embedding_service, vector_store=vector_store)
 
 # In-memory document buffer cache for active session processing
@@ -72,27 +74,35 @@ def health_check():
     return {
         "status": "healthy",
         "vector_store_stats": stats,
-        "embedding_model": embedding_service.model_name
+        "embedding_model": embedding_service.model_name,
+        "bucket_name": storage_bucket.bucket_name
     }
 
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     """
-    Parses an uploaded PDF file using PyMuPDF and caches its structured text.
+    Parses an uploaded PDF file, saves it into Cloudflare R2 / Storage Bucket, and caches text metadata.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     try:
         contents = await file.read()
+        
+        # 1. Save file to Storage Bucket (Cloudflare R2 / S3 / Local Volume)
+        bucket_info = storage_bucket.save_file(file.filename, contents)
+
+        # 2. Parse PDF via PyMuPDF
         parsed_doc = PDFParser.parse_pdf_bytes(contents, file.filename)
+        parsed_doc["bucket_info"] = bucket_info
         
         # Cache parsed doc in memory
         document_cache[file.filename] = parsed_doc
 
         return {
-            "message": "PDF uploaded and parsed successfully",
+            "message": "PDF uploaded, stored in bucket, and parsed successfully",
             "filename": file.filename,
+            "bucket_info": bucket_info,
             "metadata": parsed_doc["metadata"],
             "page_count": len(parsed_doc["pages"])
         }
@@ -103,11 +113,17 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.post("/api/process")
 def process_chunks(req: ProcessRequest):
     """
-    Applies the selected chunking strategy to the uploaded document and indexes vectors into ChromaDB using BGE Large embeddings.
+    Applies selected chunking strategy to PDF text and indexes vectors into ChromaDB using BGE Large embeddings.
     """
     filename = req.filename
     if filename not in document_cache:
-        raise HTTPException(status_code=404, detail=f"Document '{filename}' not found. Please upload it first.")
+        # Try fetching file bytes from Storage Bucket
+        file_bytes = storage_bucket.get_file(filename)
+        if file_bytes:
+            parsed_doc = PDFParser.parse_pdf_bytes(file_bytes, filename)
+            document_cache[filename] = parsed_doc
+        else:
+            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in bucket or memory.")
 
     doc_data = document_cache[filename]
     pages_data = doc_data["pages"]
@@ -150,7 +166,12 @@ async def analyze_document_endpoint(req: AnalyzeRequest):
     """
     filename = req.filename
     if filename not in document_cache:
-        raise HTTPException(status_code=404, detail=f"Document '{filename}' not found. Please upload it first.")
+        file_bytes = storage_bucket.get_file(filename)
+        if file_bytes:
+            parsed_doc = PDFParser.parse_pdf_bytes(file_bytes, filename)
+            document_cache[filename] = parsed_doc
+        else:
+            raise HTTPException(status_code=404, detail=f"Document '{filename}' not found.")
 
     doc_text = document_cache[filename].get("full_text", "")
     analysis_result = await analyze_extracted_data(
@@ -210,6 +231,26 @@ def chat_endpoint(req: ChatRequest):
         "system_prompt_used": rag_result["system_prompt_used"],
         "retrieved_count": rag_result["retrieved_count"]
     }
+
+@app.get("/api/bucket/files")
+def list_bucket_files():
+    """
+    Lists all PDF files stored in Cloudflare R2 / S3 Storage Bucket.
+    """
+    return {
+        "bucket_name": storage_bucket.bucket_name,
+        "files": storage_bucket.list_files()
+    }
+
+@app.delete("/api/bucket/files/{filename}")
+def delete_bucket_file(filename: str):
+    """
+    Deletes a PDF file from the Storage Bucket.
+    """
+    deleted = storage_bucket.delete_file(filename)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="File not found in storage bucket.")
+    return {"message": f"Deleted '{filename}' from storage bucket."}
 
 @app.get("/api/sessions")
 def list_sessions():
