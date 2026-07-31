@@ -55,7 +55,7 @@ class RAGEngine:
             raise RuntimeError("Failed to generate query vector embedding.")
         query_vec = query_embeddings[0]
 
-        # 2. Retrieve top matching chunks (First try with filename filter, fallback to all chunks)
+        # 2. Retrieve top matching chunks
         retrieved_chunks = self.vector_store.similarity_search(
             query_embedding=query_vec,
             top_k=top_k,
@@ -113,6 +113,40 @@ class RAGEngine:
             "retrieved_count": len(retrieved_chunks)
         }
 
+    def _generate_cloudflare_worker_llm(
+        self, system_prompt: str, context: str, query: str, temperature: float
+    ) -> str:
+        """
+        Sends payload directly to Cloudflare Worker AI link
+        """
+        target_url = self.worker_base_url
+        if not target_url:
+            raise ValueError("Worker base URL is not set.")
+
+        payload = {
+            "query": query,
+            "text": context,
+            "system_prompt": system_prompt,
+            "temperature": temperature
+        }
+
+        logger.info(f"Calling Cloudflare Worker AI link at '{target_url}'...")
+        resp = requests.post(target_url, json=payload, timeout=55)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            ans = (
+                data.get("response") or
+                data.get("result", {}).get("response") or
+                data.get("result") or
+                ""
+            )
+            if isinstance(ans, str) and len(ans.strip()) > 10:
+                logger.info("Successfully generated LLM response via Cloudflare Worker AI link!")
+                return ans.strip()
+
+        raise RuntimeError(f"Cloudflare Worker HTTP {resp.status_code}: {resp.text}")
+
     def _generate_cloudflare_rest_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
@@ -158,30 +192,19 @@ INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
         ans = result.get("response", "").strip()
         return ans
 
-    def _generate_cloudflare_worker_llm(
-        self, system_prompt: str, context: str, query: str, temperature: float
-    ) -> str:
-        worker_url = f"{self.worker_base_url}/chat" if not self.worker_base_url.endswith("/chat") else self.worker_base_url
-        payload = {
-            "query": query,
-            "text": context,
-            "system_prompt": system_prompt,
-            "temperature": temperature
-        }
-
-        resp = requests.post(worker_url, json=payload, timeout=50)
-        if resp.status_code == 200:
-            data = resp.json()
-            ans = data.get("response") or data.get("result", {}).get("response", "")
-            if isinstance(ans, str) and len(ans.strip()) > 10:
-                return ans.strip()
-
-        raise RuntimeError("Worker call failed")
-
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
-        # 1. Try Direct Cloudflare Workers AI REST API
+        # 1. Try Cloudflare Worker URL Link first
+        if self.worker_base_url:
+            try:
+                ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
+                if ans:
+                    return ans
+            except Exception as e:
+                logger.warning(f"Cloudflare Worker AI link call failed: {e}")
+
+        # 2. Try Direct Cloudflare REST API (if real Account ID & Token set)
         if self.account_id and self.api_token:
             try:
                 ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature)
@@ -189,15 +212,6 @@ INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
                     return ans
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
-
-        # 2. Try Worker URL endpoint
-        if self.worker_base_url:
-            try:
-                ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
-                if ans:
-                    return ans
-            except Exception as e:
-                logger.warning(f"Cloudflare Worker LLM call failed: {e}")
 
         # 3. Master Detailed Synthesizer Fallback
         pages_referenced = sorted(list(set([
