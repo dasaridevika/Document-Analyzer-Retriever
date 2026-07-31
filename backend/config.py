@@ -29,9 +29,9 @@ CLOUDFLARE_LLM_MODEL = os.getenv(
     "CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3-8b-instruct"
 )
 
-# API Host & Port
-BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
-BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8000))
+# API Host & Port (Internal port 8001 to prevent port collision with Railway $PORT)
+BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
+BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8001))
 
 # Default System Prompt presets
 DEFAULT_SYSTEM_PROMPT = """You are a precise, highly analytical Document AI assistant.

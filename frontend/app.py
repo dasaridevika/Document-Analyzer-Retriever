@@ -11,8 +11,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Backend URL Configuration
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+# Backend URL Configuration (Internal port 8001)
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001")
 
 # Load Custom CSS
 def load_css():
