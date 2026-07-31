@@ -11,8 +11,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Backend URL Configuration (Internal port 8001)
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001")
+# Backend URL Configuration
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001").rstrip("/")
 
 # Load Custom CSS
 def load_css():
@@ -51,12 +51,14 @@ with st.sidebar:
 
     # System Health Badge
     try:
-        h_resp = requests.get(f"{BACKEND_URL}/api/health", timeout=3)
+        h_resp = requests.get(f"{BACKEND_URL}/api/health", timeout=10)
         if h_resp.status_code == 200:
             h_data = h_resp.json()
-            st.success(f"🟢 Connected | Vector Chunks: `{h_data.get('vector_store_stats', {}).get('total_chunks', 0)}`")
-    except Exception:
-        st.warning("🟠 Backend Starting / Offline")
+            st.success(f"🟢 Connected | Chunks: `{h_data.get('vector_store_stats', {}).get('total_chunks', 0)}`")
+        else:
+            st.warning("🟠 Backend Starting...")
+    except Exception as e:
+        st.warning("🟠 Backend Initializing...")
 
     st.divider()
 
@@ -103,7 +105,7 @@ with st.sidebar:
     # Saved Conversations Manager (Railway Volume persistent storage)
     st.subheader("💾 Saved Sessions (Railway Storage)")
     try:
-        resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=5)
+        resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=10)
         if resp.status_code == 200:
             saved_sessions = resp.json()
             if saved_sessions:
@@ -115,7 +117,7 @@ with st.sidebar:
                 if selected_sess_label != "None":
                     target_id = session_options[selected_sess_label]
                     if st.button("🔄 Load Selected Session", use_container_width=True):
-                        sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{target_id}")
+                        sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{target_id}", timeout=10)
                         if sess_resp.status_code == 200:
                             sess_data = sess_resp.json()
                             st.session_state.session_id = target_id
@@ -171,33 +173,35 @@ with tab1:
         if uploaded_file is not None:
             if st.button("🚀 Upload to Bucket & Index", type="primary", use_container_width=True):
                 with st.spinner("Saving PDF to Storage Bucket & extracting text..."):
-                    # Upload PDF
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-                    up_resp = requests.post(f"{BACKEND_URL}/api/upload", files=files)
+                    try:
+                        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
+                        up_resp = requests.post(f"{BACKEND_URL}/api/upload", files=files, timeout=120)
 
-                    if up_resp.status_code == 200:
-                        up_data = up_resp.json()
-                        st.session_state.current_filename = up_data["filename"]
-                        st.session_state.doc_metadata = up_data["metadata"]
+                        if up_resp.status_code == 200:
+                            up_data = up_resp.json()
+                            st.session_state.current_filename = up_data["filename"]
+                            st.session_state.doc_metadata = up_data["metadata"]
 
-                        # Apply Chunking & Vector Indexing
-                        with st.spinner(f"Chunking via '{chunk_strategy}' strategy & embedding with Cloudflare Workers AI (bge-large-en-v1.5)..."):
-                            proc_payload = {
-                                "filename": up_data["filename"],
-                                "strategy": chunk_strategy,
-                                "chunk_size": chunk_size,
-                                "chunk_overlap": chunk_overlap
-                            }
-                            proc_resp = requests.post(f"{BACKEND_URL}/api/process", json=proc_payload)
-                            if proc_resp.status_code == 200:
-                                proc_data = proc_resp.json()
-                                st.session_state.chunks_data = proc_data.get("sample_chunk", [])
-                                storage_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
-                                st.success(f"Successfully stored in '{storage_type}' and processed {proc_data['chunk_count']} chunks for '{up_data['filename']}'!")
-                            else:
-                                st.error(f"Processing error: {proc_resp.text}")
-                    else:
-                        st.error(f"Upload error: {up_resp.text}")
+                            # Apply Chunking & Vector Indexing
+                            with st.spinner(f"Chunking via '{chunk_strategy}' strategy & embedding with Cloudflare Workers AI (bge-large-en-v1.5)..."):
+                                proc_payload = {
+                                    "filename": up_data["filename"],
+                                    "strategy": chunk_strategy,
+                                    "chunk_size": chunk_size,
+                                    "chunk_overlap": chunk_overlap
+                                }
+                                proc_resp = requests.post(f"{BACKEND_URL}/api/process", json=proc_payload, timeout=120)
+                                if proc_resp.status_code == 200:
+                                    proc_data = proc_resp.json()
+                                    st.session_state.chunks_data = proc_data.get("sample_chunk", [])
+                                    storage_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
+                                    st.success(f"Successfully stored in '{storage_type}' and processed {proc_data['chunk_count']} chunks for '{up_data['filename']}'!")
+                                else:
+                                    st.error(f"Processing error: {proc_resp.text}")
+                        else:
+                            st.error(f"Upload error: {up_resp.text}")
+                    except Exception as e:
+                        st.error(f"Upload connection error: {str(e)}")
 
     with col2:
         if st.session_state.doc_metadata:
@@ -217,12 +221,15 @@ with tab1:
         st.subheader("✨ Cloudflare AI Deep Document Analysis")
         if st.button("🔍 Run Full AI Document Analysis (Summary, Keywords, Sentiment, Actions)", use_container_width=True):
             with st.spinner("Analyzing document content via Cloudflare Workers AI..."):
-                an_resp = requests.post(f"{BACKEND_URL}/api/analyze", json={"filename": st.session_state.current_filename})
-                if an_resp.status_code == 200:
-                    st.session_state.analysis_data = an_resp.json().get("analysis", {})
-                    st.success("AI Analysis Complete!")
-                else:
-                    st.error(f"Analysis failed: {an_resp.text}")
+                try:
+                    an_resp = requests.post(f"{BACKEND_URL}/api/analyze", json={"filename": st.session_state.current_filename}, timeout=120)
+                    if an_resp.status_code == 200:
+                        st.session_state.analysis_data = an_resp.json().get("analysis", {})
+                        st.success("AI Analysis Complete!")
+                    else:
+                        st.error(f"Analysis failed: {an_resp.text}")
+                except Exception as e:
+                    st.error(f"Analysis error: {e}")
 
         if st.session_state.analysis_data:
             an = st.session_state.analysis_data
@@ -247,7 +254,7 @@ with tab1:
         st.divider()
         st.subheader("🔍 Chunk Strategy Visualizer")
         if st.button("Inspect Generated Chunks"):
-            c_resp = requests.get(f"{BACKEND_URL}/api/chunks/{st.session_state.current_filename}")
+            c_resp = requests.get(f"{BACKEND_URL}/api/chunks/{st.session_state.current_filename}", timeout=10)
             if c_resp.status_code == 200:
                 chunks = c_resp.json().get("chunks", [])
                 st.caption(f"Showing {len(chunks)} parsed chunks:")
@@ -265,7 +272,7 @@ with tab2:
 
     # Active Document & Multi-Document Selector
     try:
-        b_files_resp = requests.get(f"{BACKEND_URL}/api/bucket/files", timeout=3)
+        b_files_resp = requests.get(f"{BACKEND_URL}/api/bucket/files", timeout=5)
         if b_files_resp.status_code == 200:
             file_list = [f["filename"] for f in b_files_resp.json().get("files", [])]
             if file_list:
@@ -316,7 +323,7 @@ with tab2:
                 }
 
                 try:
-                    resp = requests.post(f"{BACKEND_URL}/api/chat", json=chat_payload)
+                    resp = requests.post(f"{BACKEND_URL}/api/chat", json=chat_payload, timeout=60)
                     if resp.status_code == 200:
                         data = resp.json()
                         st.session_state.session_id = data["session_id"]
@@ -364,7 +371,7 @@ with tab2:
 with tab3:
     st.subheader("📦 Cloudflare R2 / Storage Bucket File Browser")
     try:
-        b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files")
+        b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files", timeout=10)
         if b_resp.status_code == 200:
             b_data = b_resp.json()
             bucket_name = b_data.get("bucket_name", "Storage Bucket")
@@ -387,7 +394,7 @@ with tab3:
                                         "strategy": chunk_strategy,
                                         "chunk_size": chunk_size,
                                         "chunk_overlap": chunk_overlap
-                                    })
+                                    }, timeout=120)
                                     if p_resp.status_code == 200:
                                         st.session_state.current_filename = f['filename']
                                         st.success(f"'{f['filename']}' loaded from storage bucket and indexed!")
@@ -396,7 +403,7 @@ with tab3:
                                         st.error(f"Error loading from bucket: {p_resp.text}")
                         with col_y:
                             if st.button("🗑️ Delete from Bucket", key=f"del_bucket_{f['filename']}"):
-                                requests.delete(f"{BACKEND_URL}/api/bucket/files/{f['filename']}")
+                                requests.delete(f"{BACKEND_URL}/api/bucket/files/{f['filename']}", timeout=10)
                                 st.success(f"Deleted '{f['filename']}' from bucket.")
                                 st.rerun()
             else:
@@ -408,7 +415,7 @@ with tab3:
 with tab4:
     st.subheader("📚 Saved Conversations in Railway Storage")
     try:
-        resp = requests.get(f"{BACKEND_URL}/api/sessions")
+        resp = requests.get(f"{BACKEND_URL}/api/sessions", timeout=10)
         if resp.status_code == 200:
             sessions = resp.json()
             if sessions:
@@ -420,7 +427,7 @@ with tab4:
                         col_a, col_b = st.columns([1, 1])
                         with col_a:
                             if st.button("📥 Load into Chat", key=f"load_{s['session_id']}"):
-                                sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{s['session_id']}")
+                                sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{s['session_id']}", timeout=10)
                                 if sess_resp.status_code == 200:
                                     sess_data = sess_resp.json()
                                     st.session_state.session_id = s['session_id']
@@ -437,7 +444,7 @@ with tab4:
                                     st.success("Session loaded successfully! Switch to Tab 2.")
                         with col_b:
                             if st.button("🗑️ Delete Session", key=f"del_{s['session_id']}"):
-                                requests.delete(f"{BACKEND_URL}/api/sessions/{s['session_id']}")
+                                requests.delete(f"{BACKEND_URL}/api/sessions/{s['session_id']}", timeout=10)
                                 st.success("Session deleted.")
                                 st.rerun()
             else:

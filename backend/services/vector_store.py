@@ -1,6 +1,5 @@
 import os
 import chromadb
-from chromadb.config import Settings
 import logging
 from typing import List, Dict, Any
 from backend.config import VECTOR_DB_DIR
@@ -15,10 +14,12 @@ class VectorStoreManager:
     """
 
     def __init__(self, collection_name: str = "doc_analyser_collection"):
-        self.client = chromadb.PersistentClient(
-            path=str(VECTOR_DB_DIR),
-            settings=Settings(anonymized_telemetry=False)
-        )
+        try:
+            self.client = chromadb.PersistentClient(path=str(VECTOR_DB_DIR))
+        except Exception as e:
+            logger.warning(f"PersistentClient fallback initialization: {e}")
+            self.client = chromadb.Client()
+
         self.collection_name = collection_name
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
