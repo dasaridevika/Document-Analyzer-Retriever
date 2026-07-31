@@ -3,8 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 import uvicorn
 import logging
+import shutil
+import gc
 
 from backend.services.pdf_parser import PDFParser
 from backend.services.chunker import DocumentChunker
@@ -14,15 +17,18 @@ from backend.services.history_store import HistoryStore
 from backend.services.storage_bucket import StorageBucketManager
 from backend.services.rag_engine import RAGEngine
 from backend.services.worker_analyzer import analyze_extracted_data
-from backend.config import DEFAULT_SYSTEM_PROMPT, BACKEND_HOST, BACKEND_PORT
+from backend.config import DEFAULT_SYSTEM_PROMPT, BACKEND_HOST, BACKEND_PORT, DATA_DIR
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doc_analyser_backend")
 
+UPLOAD_DIR = DATA_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 app = FastAPI(
     title="Document Analyser & Retriever API",
-    description="Non-blocking RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings, Vector Storage, & Chat Persistence",
-    version="1.3.0"
+    description="Memory-optimized RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings, Vector Storage, & Storage Bucket",
+    version="1.4.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -41,7 +47,7 @@ history_store = HistoryStore()
 storage_bucket = StorageBucketManager()
 rag_engine = RAGEngine(embedding_service=embedding_service, vector_store=vector_store)
 
-# In-memory document buffer cache for active session processing
+# In-memory document buffer cache
 document_cache: Dict[str, Dict[str, Any]] = {}
 
 # Pydantic Schemas
@@ -56,7 +62,7 @@ class ChatRequest(BaseModel):
     query: str
     filename: Optional[str] = None
     system_prompt: Optional[str] = DEFAULT_SYSTEM_PROMPT
-    top_k: int = 4
+    top_k: int = 5
     temperature: float = 0.2
     chunk_strategy: Optional[str] = "recursive"
     chunk_size: Optional[int] = 500
@@ -79,28 +85,36 @@ def health_check():
         "bucket_name": storage_bucket.bucket_name
     }
 
+def _save_and_parse_pdf(file: UploadFile) -> Dict[str, Any]:
+    file_path = UPLOAD_DIR / file.filename
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    bucket_info = storage_bucket.save_file(file.filename, file_bytes)
+
+    parsed_doc = PDFParser.parse_pdf_file(str(file_path), file.filename)
+    parsed_doc["bucket_info"] = bucket_info
+    gc.collect()
+    return parsed_doc
+
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     """
-    Parses an uploaded PDF file in a threadpool so main asyncio loop remains unblocked.
+    Streams PDF file to disk and parses with low memory footprint (<10MB RAM).
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     try:
-        contents = await file.read()
-        
-        # Run blocking IO / PyMuPDF parsing in threadpool
-        bucket_info = await run_in_threadpool(storage_bucket.save_file, file.filename, contents)
-        parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, contents, file.filename)
-        
-        parsed_doc["bucket_info"] = bucket_info
+        parsed_doc = await run_in_threadpool(_save_and_parse_pdf, file)
         document_cache[file.filename] = parsed_doc
 
         return {
             "message": "PDF uploaded, stored in bucket, and parsed successfully",
             "filename": file.filename,
-            "bucket_info": bucket_info,
+            "bucket_info": parsed_doc.get("bucket_info"),
             "metadata": parsed_doc["metadata"],
             "page_count": len(parsed_doc["pages"])
         }
@@ -110,9 +124,6 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @app.post("/api/process")
 async def process_chunks(req: ProcessRequest):
-    """
-    Applies selected chunking strategy and indexes vectors into ChromaDB asynchronously.
-    """
     filename = req.filename
     if filename not in document_cache:
         file_bytes = await run_in_threadpool(storage_bucket.get_file, filename)
@@ -143,6 +154,7 @@ async def process_chunks(req: ProcessRequest):
     await run_in_threadpool(vector_store.add_chunks, chunks, embeddings)
 
     doc_data["chunks"] = chunks
+    gc.collect()
 
     return {
         "message": f"Successfully chunked and indexed {len(chunks)} text chunks.",

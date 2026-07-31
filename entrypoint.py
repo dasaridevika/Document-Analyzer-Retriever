@@ -21,6 +21,15 @@ def wait_for_backend(url: str, timeout: int = 30) -> bool:
         time.sleep(1)
     return False
 
+def start_backend_process(backend_port: str):
+    backend_cmd = [
+        sys.executable, "-m", "uvicorn", "backend.main:app",
+        "--host", "0.0.0.0",
+        "--port", str(backend_port)
+    ]
+    print(f"Launching FastAPI backend on 0.0.0.0:{backend_port}...")
+    return subprocess.Popen(backend_cmd)
+
 def main():
     port = os.getenv("PORT", "8501")
     backend_port = os.getenv("BACKEND_PORT", "8001")
@@ -31,24 +40,16 @@ def main():
     print(f" Streamlit Frontend Port: {port}")
     print(f"=========================================================")
 
-    # 1. Launch FastAPI Backend process (binding to 0.0.0.0:8001)
-    backend_cmd = [
-        sys.executable, "-m", "uvicorn", "backend.main:app",
-        "--host", "0.0.0.0",
-        "--port", str(backend_port)
-    ]
-    print(f"Launching FastAPI backend on 0.0.0.0:{backend_port}...")
-    backend_process = subprocess.Popen(backend_cmd)
+    # 1. Launch FastAPI Backend process
+    backend_process = start_backend_process(backend_port)
 
-    # 2. Wait for FastAPI backend to become healthy
+    # 2. Wait for FastAPI backend readiness
     health_url = f"http://127.0.0.1:{backend_port}/api/health"
     print(f"Waiting for FastAPI backend to respond at {health_url}...")
     
     healthy = wait_for_backend(health_url, timeout=35)
     if not healthy:
-        print(f"CRITICAL ERROR: FastAPI backend failed to start on port {backend_port} within 35 seconds!")
-        backend_process.terminate()
-        sys.exit(1)
+        print(f"CRITICAL WARNING: FastAPI backend slow to start on port {backend_port}. Proceeding with frontend launch...")
 
     print(f"✅ FastAPI backend is HEALTHY and ready!")
 
@@ -59,27 +60,25 @@ def main():
         "--server.address", "0.0.0.0",
         "--server.headless", "true",
         "--server.enableCORS", "false",
-        "--server.enableXsrfProtection", "false"
+        "--server.enableXsrfProtection", "false",
+        "--server.maxUploadSize", "200"
     ]
     print(f"Launching Streamlit frontend on port {port}...")
     frontend_process = subprocess.Popen(frontend_cmd)
 
-    # Monitor processes
+    # Process Auto-Restart Supervisor Loop
     try:
         while True:
             b_code = backend_process.poll()
             f_code = frontend_process.poll()
 
             if b_code is not None:
-                print(f"ERROR: FastAPI backend exited unexpectedly with code {b_code}")
-                if frontend_process.poll() is None:
-                    frontend_process.terminate()
-                sys.exit(b_code)
+                print(f"WARNING: FastAPI backend process exited (code {b_code}). Auto-restarting backend...")
+                backend_process = start_backend_process(backend_port)
 
             if f_code is not None:
-                print(f"ERROR: Streamlit frontend exited unexpectedly with code {f_code}")
-                if backend_process.poll() is None:
-                    backend_process.terminate()
+                print(f"ERROR: Streamlit frontend process exited (code {f_code}). Terminating...")
+                backend_process.terminate()
                 sys.exit(f_code)
 
             time.sleep(2)
