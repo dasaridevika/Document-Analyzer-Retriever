@@ -11,6 +11,7 @@ from backend.services.embeddings import EmbeddingService
 from backend.services.vector_store import VectorStoreManager
 from backend.services.history_store import HistoryStore
 from backend.services.rag_engine import RAGEngine
+from backend.services.worker_analyzer import analyze_extracted_data
 from backend.config import DEFAULT_SYSTEM_PROMPT, BACKEND_HOST, BACKEND_PORT
 
 logging.basicConfig(level=logging.INFO)
@@ -18,8 +19,8 @@ logger = logging.getLogger("doc_analyser_backend")
 
 app = FastAPI(
     title="Document Analyser & Retriever API",
-    description="RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings, Vector Storage, & Chat Session Persistence",
-    version="1.0.0"
+    description="RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings (@cf/baai/bge-large-en-v1.5), Vector Storage, & Chat Persistence",
+    version="1.1.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -56,6 +57,12 @@ class ChatRequest(BaseModel):
     temperature: float = 0.2
     chunk_strategy: Optional[str] = "recursive"
     chunk_size: Optional[int] = 500
+
+class AnalyzeRequest(BaseModel):
+    filename: str
+    url: Optional[str] = ""
+    title: Optional[str] = ""
+    analysis_type: Optional[str] = "summary"
 
 # Endpoints
 
@@ -96,7 +103,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.post("/api/process")
 def process_chunks(req: ProcessRequest):
     """
-    Applies the selected chunking strategy to the uploaded document and indexes vectors into ChromaDB.
+    Applies the selected chunking strategy to the uploaded document and indexes vectors into ChromaDB using BGE Large embeddings.
     """
     filename = req.filename
     if filename not in document_cache:
@@ -136,12 +143,34 @@ def process_chunks(req: ProcessRequest):
         "sample_chunk": chunks[0] if chunks else None
     }
 
+@app.post("/api/analyze")
+async def analyze_document_endpoint(req: AnalyzeRequest):
+    """
+    Runs Cloudflare Worker LLM analysis (summary, topics, keywords, sentiment, key takeaways, action items) on document text.
+    """
+    filename = req.filename
+    if filename not in document_cache:
+        raise HTTPException(status_code=404, detail=f"Document '{filename}' not found. Please upload it first.")
+
+    doc_text = document_cache[filename].get("full_text", "")
+    analysis_result = await analyze_extracted_data(
+        url=req.url or filename,
+        title=req.title or filename,
+        extracted_text=doc_text,
+        analysis_type=req.analysis_type
+    )
+
+    document_cache[filename]["analysis"] = analysis_result
+    return {
+        "filename": filename,
+        "analysis": analysis_result
+    }
+
 @app.post("/api/chat")
 def chat_endpoint(req: ChatRequest):
     """
     RAG Chat endpoint with dynamic system prompt, retrieval, and persistent chat history saving.
     """
-    # 1. Ensure or Create Session ID
     session_id = req.session_id
     filename = req.filename or "General Document"
 
@@ -153,10 +182,10 @@ def chat_endpoint(req: ChatRequest):
             chunk_size=req.chunk_size
         )
 
-    # 2. Save User Message to History
+    # Save User Message to History
     history_store.add_message(session_id, role="user", content=req.query)
 
-    # 3. RAG Retrieval & Answer Synthesis
+    # RAG Retrieval & Answer Synthesis
     rag_result = rag_engine.answer_query(
         query=req.query,
         filename=req.filename,
@@ -165,7 +194,7 @@ def chat_endpoint(req: ChatRequest):
         temperature=req.temperature
     )
 
-    # 4. Save Assistant Response & Sources to History
+    # Save Assistant Response & Sources to History
     history_store.add_message(
         session_id=session_id,
         role="assistant",
@@ -184,16 +213,10 @@ def chat_endpoint(req: ChatRequest):
 
 @app.get("/api/sessions")
 def list_sessions():
-    """
-    Returns all saved chat sessions from Railway storage database.
-    """
     return history_store.list_sessions()
 
 @app.get("/api/sessions/{session_id}")
 def get_session_details(session_id: str):
-    """
-    Retrieves a session's metadata and full transcript messages.
-    """
     session = history_store.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -206,9 +229,6 @@ def get_session_details(session_id: str):
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str):
-    """
-    Deletes a session and its message history.
-    """
     deleted = history_store.delete_session(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -216,9 +236,6 @@ def delete_session(session_id: str):
 
 @app.get("/api/chunks/{filename}")
 def get_document_chunks(filename: str):
-    """
-    Returns the parsed chunks for a document for visual inspection.
-    """
     if filename not in document_cache or "chunks" not in document_cache[filename]:
         raise HTTPException(status_code=404, detail="Chunks not available for this document.")
     return {

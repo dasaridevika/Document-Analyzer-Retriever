@@ -32,6 +32,8 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "analysis_data" not in st.session_state:
+    st.session_state.analysis_data = None
 if "system_prompt" not in st.session_state:
     st.session_state.system_prompt = """You are a precise, highly analytical Document AI assistant.
 Your goal is to answer the user's questions strictly based on the provided document context.
@@ -126,6 +128,7 @@ with st.sidebar:
     if st.button("➕ Start New Session", use_container_width=True):
         st.session_state.session_id = None
         st.session_state.messages = []
+        st.session_state.analysis_data = None
         st.success("New session initialized.")
         st.rerun()
 
@@ -133,13 +136,13 @@ with st.sidebar:
 st.markdown("""
 <div class="main-header">
     <h1>📄 Document Analyser & RAG Retriever</h1>
-    <p>Powered by PyMuPDF PDF Chunking, Cloudflare Workers AI Embeddings (bge-large-en-v1.5 / embeddinggemma-300m), and Persistent Railway Volume Storage.</p>
+    <p>Powered by PyMuPDF PDF Chunking, Cloudflare Workers AI Embeddings (bge-large-en-v1.5), and Persistent Railway Volume Storage.</p>
 </div>
 """, unsafe_allow_html=True)
 
 # TABS NAVIGATION
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📥 1. Upload & Chunk PDF",
+    "📥 1. Upload & Analyze PDF",
     "💬 2. RAG Chatbot",
     "📚 3. Saved History Browser",
     "📊 4. Free-Tier Token Monitor"
@@ -166,7 +169,7 @@ with tab1:
                         st.session_state.doc_metadata = up_data["metadata"]
 
                         # Apply Chunking & Vector Indexing
-                        with st.spinner(f"Chunking via '{chunk_strategy}' strategy & embedding with Cloudflare Workers AI..."):
+                        with st.spinner(f"Chunking via '{chunk_strategy}' strategy & embedding with Cloudflare Workers AI (bge-large-en-v1.5)..."):
                             proc_payload = {
                                 "filename": up_data["filename"],
                                 "strategy": chunk_strategy,
@@ -195,8 +198,39 @@ with tab1:
             with c3:
                 st.markdown(f"<div class='metric-card'><h3>Total Chars</h3><p>{meta.get('total_chars', 0):,}</p></div>", unsafe_allow_html=True)
 
-    # Chunks Visualizer
+    # Cloudflare AI Deep Analysis Section
     if st.session_state.current_filename:
+        st.divider()
+        st.subheader("✨ Cloudflare AI Deep Document Analysis")
+        if st.button("🔍 Run Full AI Document Analysis (Summary, Keywords, Sentiment, Actions)", use_container_width=True):
+            with st.spinner("Analyzing document content via Cloudflare Workers AI..."):
+                an_resp = requests.post(f"{BACKEND_URL}/api/analyze", json={"filename": st.session_state.current_filename})
+                if an_resp.status_code == 200:
+                    st.session_state.analysis_data = an_resp.json().get("analysis", {})
+                    st.success("AI Analysis Complete!")
+                else:
+                    st.error(f"Analysis failed: {an_resp.text}")
+
+        if st.session_state.analysis_data:
+            an = st.session_state.analysis_data
+            ac1, ac2 = st.columns([2, 1])
+            with ac1:
+                st.markdown(f"**Executive Summary:**\n> {an.get('summary', 'N/A')}")
+                if an.get("important_points"):
+                    st.markdown("**Key Takeaways:**")
+                    for p in an.get("important_points", []):
+                        st.markdown(f"- {p}")
+                if an.get("action_items"):
+                    st.markdown("**Action Items:**")
+                    for a in an.get("action_items", []):
+                        st.markdown(f"-[ ] {a}")
+            with ac2:
+                st.markdown(f"**Sentiment:** `{an.get('sentiment', 'neutral').upper()}`")
+                if an.get("topics"):
+                    st.markdown(f"**Topics:** {', '.join(an.get('topics', []))}")
+                if an.get("keywords"):
+                    st.markdown(f"**Keywords:** {', '.join(an.get('keywords', []))}")
+
         st.divider()
         st.subheader("🔍 Chunk Strategy Visualizer")
         if st.button("Inspect Generated Chunks"):
@@ -239,7 +273,6 @@ with tab2:
     # User Input Chat Box
     user_query = st.chat_input("Ask a question about the document...")
     if user_query:
-        # Append User Message
         st.session_state.messages.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
@@ -335,8 +368,8 @@ with tab4:
     st.markdown("""
     ### Cloudflare Workers AI Free Tier Limits:
     - **Neurons Daily Allowance:** 10,000 Neurons / Day (Free Tier)
-    - **Recommended Embedding Model:** `@cf/baai/bge-large-en-v1.5` (~1,024 vector dimensions)
-    - **Alternative Model:** `@cf/google/embeddinggemma-300m` (~768 vector dimensions)
+    - **Embedding Model:** `@cf/baai/bge-large-en-v1.5` (~1,024 vector dimensions)
+    - **LLM Model:** `@cf/meta/llama-3-8b-instruct`
     """)
 
     st.divider()

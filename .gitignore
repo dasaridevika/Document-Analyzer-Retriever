@@ -12,3 +12,5 @@ data/
 *.sqlite
 .chroma/
 .streamlit/secrets.toml
+
+.wrangler/
