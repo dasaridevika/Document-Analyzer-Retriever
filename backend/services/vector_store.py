@@ -1,8 +1,11 @@
+import os
 import chromadb
 from chromadb.config import Settings
 import logging
 from typing import List, Dict, Any
 from backend.config import VECTOR_DB_DIR
+
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +30,6 @@ class VectorStoreManager:
         chunks: List[Dict[str, Any]],
         embeddings: List[List[float]]
     ) -> None:
-        """
-        Adds text chunks and corresponding embedding vectors to ChromaDB.
-        """
         if not chunks or not embeddings:
             return
 
@@ -61,9 +61,6 @@ class VectorStoreManager:
         top_k: int = 4,
         filename_filter: str = None
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieves top_k nearest chunk neighbors given a query embedding vector.
-        """
         where_clause = {"filename": filename_filter} if filename_filter else None
 
         results = self.collection.query(
@@ -81,7 +78,6 @@ class VectorStoreManager:
             distances = results["distances"][0]
 
             for i in range(len(ids)):
-                # Convert cosine distance to similarity score (0 to 1)
                 dist = distances[i]
                 similarity = round(max(0.0, 1.0 - float(dist)), 4)
 
@@ -96,9 +92,6 @@ class VectorStoreManager:
         return retrieved_chunks
 
     def clear_document(self, filename: str) -> None:
-        """
-        Removes all vectors associated with a specific document file.
-        """
         try:
             self.collection.delete(where={"filename": filename})
             logger.info(f"Deleted chunks for document '{filename}' from vector store.")
@@ -106,9 +99,6 @@ class VectorStoreManager:
             logger.warning(f"Error clearing document '{filename}': {e}")
 
     def clear_all(self) -> None:
-        """
-        Clears the entire collection.
-        """
         self.client.delete_collection(self.collection_name)
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name,
@@ -116,9 +106,6 @@ class VectorStoreManager:
         )
 
     def get_stats(self) -> Dict[str, Any]:
-        """
-        Returns stats about indexed document vectors.
-        """
         count = self.collection.count()
         return {
             "total_chunks": count,

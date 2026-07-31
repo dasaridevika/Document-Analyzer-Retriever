@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Disable ChromaDB anonymous telemetry logs
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
 load_dotenv()
 
 # Base directories
@@ -14,7 +17,7 @@ VECTOR_DB_DIR.mkdir(parents=True, exist_ok=True)
 
 HISTORY_DB_PATH = DATA_DIR / "chat_history.db"
 
-# Cloudflare Workers AI settings (Loaded explicitly from environment variables)
+# Cloudflare Workers AI settings
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
 
