@@ -10,11 +10,13 @@ load_dotenv()
 # Base directories
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Persistent Storage Path (Defaults to /app/storage inside Railway Docker container)
-env_data_dir = os.getenv("DATA_DIR")
+# Detect Railway Persistent Volume Storage Mount Path (/data or /app/storage)
+env_data_dir = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
 if env_data_dir:
     DATA_DIR = Path(env_data_dir)
-elif Path("/app").exists():
+elif Path("/data").exists():
+    DATA_DIR = Path("/data")
+elif Path("/app/storage").exists():
     DATA_DIR = Path("/app/storage")
 else:
     DATA_DIR = BASE_DIR / "storage"
