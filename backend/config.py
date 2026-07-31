@@ -7,11 +7,18 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 load_dotenv()
 
+# Helper to sanitize placeholder strings from env variables
+def get_clean_env(key: str, default: str = "") -> str:
+    val = os.getenv(key, default).strip()
+    if not val or "your_" in val.lower() or "placeholder" in val.lower() or "xxx" in val.lower():
+        return ""
+    return val
+
 # Base directories
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Detect Railway Persistent Volume Storage Mount Path (/data or /app/storage)
-env_data_dir = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+env_data_dir = get_clean_env("DATA_DIR") or get_clean_env("RAILWAY_VOLUME_MOUNT_PATH")
 if env_data_dir:
     DATA_DIR = Path(env_data_dir)
 elif Path("/data").exists():
@@ -28,9 +35,9 @@ VECTOR_DB_DIR.mkdir(parents=True, exist_ok=True)
 
 HISTORY_DB_PATH = DATA_DIR / "chat_history.db"
 
-# Cloudflare Workers AI settings
-CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
-CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
+# Cloudflare Workers AI settings (Sanitized against dummy placeholders)
+CLOUDFLARE_ACCOUNT_ID = get_clean_env("CLOUDFLARE_ACCOUNT_ID")
+CLOUDFLARE_API_TOKEN = get_clean_env("CLOUDFLARE_API_TOKEN")
 
 # Models
 CLOUDFLARE_EMBEDDING_MODEL = os.getenv(
