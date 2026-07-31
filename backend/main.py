@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import uvicorn
@@ -20,8 +21,8 @@ logger = logging.getLogger("doc_analyser_backend")
 
 app = FastAPI(
     title="Document Analyser & Retriever API",
-    description="RAG Backend with Cloudflare R2 / S3 Storage Bucket, PyMuPDF, Cloudflare Workers AI Embeddings (@cf/baai/bge-large-en-v1.5), Vector Storage, & Chat Persistence",
-    version="1.2.0"
+    description="Non-blocking RAG Backend with PyMuPDF, Cloudflare Workers AI Embeddings, Vector Storage, & Chat Persistence",
+    version="1.3.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -81,7 +82,7 @@ def health_check():
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     """
-    Parses an uploaded PDF file, saves it into Cloudflare R2 / Storage Bucket, and caches text metadata.
+    Parses an uploaded PDF file in a threadpool so main asyncio loop remains unblocked.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -89,14 +90,11 @@ async def upload_pdf(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         
-        # 1. Save file to Storage Bucket (Cloudflare R2 / S3 / Local Volume)
-        bucket_info = storage_bucket.save_file(file.filename, contents)
-
-        # 2. Parse PDF via PyMuPDF
-        parsed_doc = PDFParser.parse_pdf_bytes(contents, file.filename)
-        parsed_doc["bucket_info"] = bucket_info
+        # Run blocking IO / PyMuPDF parsing in threadpool
+        bucket_info = await run_in_threadpool(storage_bucket.save_file, file.filename, contents)
+        parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, contents, file.filename)
         
-        # Cache parsed doc in memory
+        parsed_doc["bucket_info"] = bucket_info
         document_cache[file.filename] = parsed_doc
 
         return {
@@ -111,16 +109,15 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
 
 @app.post("/api/process")
-def process_chunks(req: ProcessRequest):
+async def process_chunks(req: ProcessRequest):
     """
-    Applies selected chunking strategy to PDF text and indexes vectors into ChromaDB using BGE Large embeddings.
+    Applies selected chunking strategy and indexes vectors into ChromaDB asynchronously.
     """
     filename = req.filename
     if filename not in document_cache:
-        # Try fetching file bytes from Storage Bucket
-        file_bytes = storage_bucket.get_file(filename)
+        file_bytes = await run_in_threadpool(storage_bucket.get_file, filename)
         if file_bytes:
-            parsed_doc = PDFParser.parse_pdf_bytes(file_bytes, filename)
+            parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, file_bytes, filename)
             document_cache[filename] = parsed_doc
         else:
             raise HTTPException(status_code=404, detail=f"Document '{filename}' not found in bucket or memory.")
@@ -129,26 +126,22 @@ def process_chunks(req: ProcessRequest):
     pages_data = doc_data["pages"]
 
     # 1. Chunking
-    chunks = DocumentChunker.chunk_document(
-        pages_data=pages_data,
-        filename=filename,
-        strategy=req.strategy,
-        chunk_size=req.chunk_size,
-        chunk_overlap=req.chunk_overlap
+    chunks = await run_in_threadpool(
+        DocumentChunker.chunk_document,
+        pages_data, filename, req.strategy, req.chunk_size, req.chunk_overlap
     )
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks could be generated from document.")
 
     # 2. Clear old vectors for document if re-processing
-    vector_store.clear_document(filename)
+    await run_in_threadpool(vector_store.clear_document, filename)
 
-    # 3. Generate Embeddings & Index
+    # 3. Generate Embeddings & Index in threadpool
     chunk_texts = [c["text"] for c in chunks]
-    embeddings = embedding_service.generate_embeddings(chunk_texts)
-    vector_store.add_chunks(chunks, embeddings)
+    embeddings = await run_in_threadpool(embedding_service.generate_embeddings, chunk_texts)
+    await run_in_threadpool(vector_store.add_chunks, chunks, embeddings)
 
-    # Store generated chunks inside cached doc data
     doc_data["chunks"] = chunks
 
     return {
@@ -161,14 +154,11 @@ def process_chunks(req: ProcessRequest):
 
 @app.post("/api/analyze")
 async def analyze_document_endpoint(req: AnalyzeRequest):
-    """
-    Runs Cloudflare Worker LLM analysis (summary, topics, keywords, sentiment, key takeaways, action items) on document text.
-    """
     filename = req.filename
     if filename not in document_cache:
-        file_bytes = storage_bucket.get_file(filename)
+        file_bytes = await run_in_threadpool(storage_bucket.get_file, filename)
         if file_bytes:
-            parsed_doc = PDFParser.parse_pdf_bytes(file_bytes, filename)
+            parsed_doc = await run_in_threadpool(PDFParser.parse_pdf_bytes, file_bytes, filename)
             document_cache[filename] = parsed_doc
         else:
             raise HTTPException(status_code=404, detail=f"Document '{filename}' not found.")
@@ -188,39 +178,29 @@ async def analyze_document_endpoint(req: AnalyzeRequest):
     }
 
 @app.post("/api/chat")
-def chat_endpoint(req: ChatRequest):
-    """
-    RAG Chat endpoint with dynamic system prompt, retrieval, and persistent chat history saving.
-    """
+async def chat_endpoint(req: ChatRequest):
     session_id = req.session_id
     filename = req.filename or "General Document"
 
     if not session_id:
-        session_id = history_store.create_session(
-            filename=filename,
-            system_prompt=req.system_prompt,
-            chunk_strategy=req.chunk_strategy,
-            chunk_size=req.chunk_size
+        session_id = await run_in_threadpool(
+            history_store.create_session,
+            filename, req.system_prompt, req.chunk_strategy, req.chunk_size
         )
 
     # Save User Message to History
-    history_store.add_message(session_id, role="user", content=req.query)
+    await run_in_threadpool(history_store.add_message, session_id, "user", req.query)
 
     # RAG Retrieval & Answer Synthesis
-    rag_result = rag_engine.answer_query(
-        query=req.query,
-        filename=req.filename,
-        system_prompt=req.system_prompt,
-        top_k=req.top_k,
-        temperature=req.temperature
+    rag_result = await run_in_threadpool(
+        rag_engine.answer_query,
+        req.query, req.filename, req.system_prompt, req.top_k, req.temperature
     )
 
     # Save Assistant Response & Sources to History
-    history_store.add_message(
-        session_id=session_id,
-        role="assistant",
-        content=rag_result["answer"],
-        sources=rag_result["sources"]
+    await run_in_threadpool(
+        history_store.add_message,
+        session_id, "assistant", rag_result["answer"], rag_result["sources"]
     )
 
     return {
@@ -233,44 +213,39 @@ def chat_endpoint(req: ChatRequest):
     }
 
 @app.get("/api/bucket/files")
-def list_bucket_files():
-    """
-    Lists all PDF files stored in Cloudflare R2 / S3 Storage Bucket.
-    """
+async def list_bucket_files():
+    files = await run_in_threadpool(storage_bucket.list_files)
     return {
         "bucket_name": storage_bucket.bucket_name,
-        "files": storage_bucket.list_files()
+        "files": files
     }
 
 @app.delete("/api/bucket/files/{filename}")
-def delete_bucket_file(filename: str):
-    """
-    Deletes a PDF file from the Storage Bucket.
-    """
-    deleted = storage_bucket.delete_file(filename)
+async def delete_bucket_file(filename: str):
+    deleted = await run_in_threadpool(storage_bucket.delete_file, filename)
     if not deleted:
         raise HTTPException(status_code=404, detail="File not found in storage bucket.")
     return {"message": f"Deleted '{filename}' from storage bucket."}
 
 @app.get("/api/sessions")
-def list_sessions():
-    return history_store.list_sessions()
+async def list_sessions():
+    return await run_in_threadpool(history_store.list_sessions)
 
 @app.get("/api/sessions/{session_id}")
-def get_session_details(session_id: str):
-    session = history_store.get_session(session_id)
+async def get_session_details(session_id: str):
+    session = await run_in_threadpool(history_store.get_session, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
 
-    messages = history_store.get_messages(session_id)
+    messages = await run_in_threadpool(history_store.get_messages, session_id)
     return {
         "session": session,
         "messages": messages
     }
 
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str):
-    deleted = history_store.delete_session(session_id)
+async def delete_session(session_id: str):
+    deleted = await run_in_threadpool(history_store.delete_session, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"message": "Session deleted successfully."}
