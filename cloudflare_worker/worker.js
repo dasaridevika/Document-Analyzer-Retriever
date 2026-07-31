@@ -1,6 +1,7 @@
 /**
- * Cloudflare Worker for Document Analysis & BGE Large Embeddings
+ * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
+ * Optimized for High-Precision, Exact Factual Accuracy (Temperature: 0.1)
  */
 
 export default {
@@ -53,7 +54,7 @@ export default {
         );
       }
 
-      // 2. CHAT & DOCUMENT ANALYSIS ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. HIGH-ACCURACY CHAT & DOCUMENT ANALYSIS ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ error: "Method not allowed" }), {
@@ -65,32 +66,43 @@ export default {
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        const effectiveSystemPrompt = system_prompt || `You are an expert AI Document Assistant.
-Provide comprehensive, detailed, and thoroughly structured explanations like ChatGPT.
-Break down complex topics into clear sections, use bullet points, bold key concepts, and cite page numbers whenever mentioned in the context.
-Deliver rich, informative responses that answer the user's question completely based on the provided document excerpts.`;
+        const masterAccuracySystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
+Your task is to provide exact, highly accurate, detailed, and specific answers based strictly on the provided Document Context.
 
-        const userMessage = query || prompt || text;
-        const contextText = text || "";
+STRICT ACCURACY INSTRUCTIONS:
+1. Base your answer ONLY on facts, definitions, numbers, formulas, and concepts directly stated in the DOCUMENT CONTEXT.
+2. If specific steps, lists, specifications, or data points exist in the context, detail EVERY item accurately.
+3. Structure your response clearly using bold headers, bullet points, and numbered steps.
+4. Cite specific page numbers whenever mentioned in the context (e.g., [Page 4], [Page 12]).
+5. Never guess, extrapolate, or introduce external information not present in the context.`;
+
+        const userQuestion = query || prompt || text;
+        const contextContent = text || "";
 
         const messages = [
-          { role: "system", content: `${effectiveSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextText}` },
-          { role: "user", content: userMessage },
+          {
+            role: "system",
+            content: `${masterAccuracySystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
+          },
+          {
+            role: "user",
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, provide an exact, thorough, and highly detailed answer for:\n\n"${userQuestion}"`,
+          },
         ];
 
         let llmResponse;
         try {
-          // Primary Active Model: Llama 3.1 8B Instruct
+          // Temperature 0.1 forces deterministic, exact factual accuracy
           llmResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
             messages: messages,
-            temperature: 0.3,
+            temperature: 0.1,
             max_tokens: 2500,
           });
         } catch (mErr) {
-          // Fallback Active Model: Llama 3 8B Instruct
+          // Fallback Active Model
           llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
             messages: messages,
-            temperature: 0.3,
+            temperature: 0.1,
             max_tokens: 2500,
           });
         }
