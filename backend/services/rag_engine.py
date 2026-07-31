@@ -14,9 +14,8 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    High-Precision Master AI RAG Engine:
-    Uses Cloudflare Workers AI Llama-3 8B Instruct with BGE Large vectors
-    to deliver highly accurate, detailed, step-by-step explanations with page citations.
+    ChatGPT-Style Narrative RAG Engine:
+    Delivers thorough, accurate, multi-paragraph prose answers formatted like ChatGPT.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -33,7 +32,7 @@ class RAGEngine:
         filename: str = None,
         system_prompt: str = None,
         top_k: int = 8,
-        temperature: float = 0.1
+        temperature: float = 0.2
     ) -> Dict[str, Any]:
         effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         clean_query = query.strip()
@@ -43,18 +42,17 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the document context to provide detailed, accurate explanations with page citations.",
+                "answer": f"Hello! I am your AI Document Assistant. Ask me any question about {doc_name}, and I will analyze the document context to provide detailed, accurate, multi-paragraph explanations with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
             }
 
-        # Check if query asks for Course Structure / Subject Names / Syllabus Table
         is_structure_query = any(k in lower_q for k in [
             "subject", "course", "syllabus", "curriculum", "list", "name", "structure", "semester", "year"
         ])
 
-        # 1. Embed query vector using BGE Large / Embedding Service
+        # 1. Embed query vector
         query_embeddings = self.embedding_service.generate_embeddings([clean_query])
         if not query_embeddings:
             raise RuntimeError("Failed to generate query vector embedding.")
@@ -79,7 +77,6 @@ class RAGEngine:
         if is_structure_query:
             toc_chunks = self.vector_store.get_page_chunks(filename=filename, pages=[1, 2, 3, 4], limit=4)
             if toc_chunks:
-                # Merge TOC chunks without duplicating
                 existing_ids = set(c["chunk_id"] for c in retrieved_chunks)
                 for tc in reversed(toc_chunks):
                     if tc["chunk_id"] not in existing_ids:
@@ -101,7 +98,7 @@ class RAGEngine:
             context_blocks.append(f"--- [EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Master ChatGPT-Style Detailed Response via Cloudflare Workers AI
+        # 4. Generate ChatGPT-style Fluid Narrative Response
         answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -173,15 +170,15 @@ class RAGEngine:
 DOCUMENT CONTEXT:
 {context}
 
-INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
-1. Direct Executive Summary: Start with a clear core answer listing the exact subject names requested.
-2. Detailed In-Depth Breakdown: Group subject names by Year and Semester clearly. Use bold terms and bullet points.
-3. Explicit Page Citations: Cite exact page numbers (e.g. [Page 1], [Page 2]).
-4. Accuracy Requirement: Base your answer strictly on the provided document excerpts without making up unverified information."""
+INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
+- Write in fluent, complete, well-written narrative paragraphs just like ChatGPT.
+- Synthesize the information thoroughly, breaking down concepts, definitions, and specific data points into clear prose.
+- Cite page numbers naturally in the text (e.g., [Page 4], [Page 12]).
+- Do not output template fragments or raw code blocks."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based on the provided document excerpts, please provide an exact and detailed list for:\n\n{query}"}
+            {"role": "user", "content": f"Based on the provided document context, write a detailed, thorough, multi-paragraph explanation for:\n\n{query}"}
         ]
 
         payload = {
@@ -223,38 +220,23 @@ INSTRUCTIONS FOR MASTER ACCURATE RESPONSE:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Master Detailed Synthesizer Fallback
+        # Master ChatGPT-Style Fluid Paragraph Synthesizer Fallback
         pages_referenced = sorted(list(set([
             c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
         ])))
         page_str = f" (Page {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
 
-        response_sections = [
-            f"### Executive Summary\nBased on a detailed analysis of the document context{page_str}, here is a comprehensive breakdown for **\"{query}\"**:\n"
+        paragraphs = [
+            f"Based on a comprehensive analysis of the document context{page_str}, here is a detailed explanation answering **\"{query}\"**:\n"
         ]
 
-        for idx, chunk in enumerate(retrieved_chunks[:6]):
+        body_paragraphs = []
+        for chunk in retrieved_chunks[:6]:
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            clean_text = " ".join([l.strip() for l in text.splitlines() if l.strip()])
+            if clean_text:
+                body_paragraphs.append(f"{clean_text} [Page {page_num}]")
 
-            if lines:
-                section_title = lines[0][:80] if len(lines[0]) < 80 else f"Key Section - Page {page_num}"
-                section_body = "\n".join(lines[1:]) if len(lines) > 1 else lines[0]
-
-                response_sections.append(f"### {idx+1}. {section_title} *(Page {page_num})*\n")
-                clean_body = re.sub(r'\s+', ' ', section_body)
-                response_sections.append(f"{clean_body}\n")
-
-        response_sections.append("### Summary & Key Takeaways\n")
-        takeaways = []
-        for c in retrieved_chunks[:4]:
-            snippet = c["text"].strip().replace("\n", " ")
-            if len(snippet) > 160:
-                snippet = snippet[:160] + "..."
-            pg = c["metadata"].get("page_number", "?")
-            takeaways.append(f"- **Page {pg}**: {snippet}")
-
-        response_sections.append("\n".join(takeaways))
-
-        return "\n\n".join(response_sections)
+        paragraphs.append("\n\n".join(body_paragraphs))
+        return "\n\n".join(paragraphs)
