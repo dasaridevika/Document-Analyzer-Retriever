@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker for Document Analysis & BGE Large Embeddings
- * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3-8b-instruct
+ * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
  */
 
 export default {
@@ -53,7 +53,7 @@ export default {
         );
       }
 
-      // 2. CHAT & DOCUMENT ANALYSIS ENDPOINT (@cf/meta/llama-3-8b-instruct - ChatGPT Detailed Style)
+      // 2. CHAT & DOCUMENT ANALYSIS ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ error: "Method not allowed" }), {
@@ -66,7 +66,7 @@ export default {
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
         const effectiveSystemPrompt = system_prompt || `You are an expert AI Document Assistant.
-Your goal is to provide comprehensive, detailed, and thoroughly structured explanations like ChatGPT.
+Provide comprehensive, detailed, and thoroughly structured explanations like ChatGPT.
 Break down complex topics into clear sections, use bullet points, bold key concepts, and cite page numbers whenever mentioned in the context.
 Deliver rich, informative responses that answer the user's question completely based on the provided document excerpts.`;
 
@@ -78,19 +78,31 @@ Deliver rich, informative responses that answer the user's question completely b
           { role: "user", content: userMessage },
         ];
 
-        // Run Llama-3 8B Instruct model with high token limit for detailed responses
-        const llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
-          messages: messages,
-          temperature: 0.3,
-          max_tokens: 2500,
-        });
+        let llmResponse;
+        try {
+          // Primary Active Model: Llama 3.1 8B Instruct
+          llmResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+            messages: messages,
+            temperature: 0.3,
+            max_tokens: 2500,
+          });
+        } catch (mErr) {
+          // Fallback Active Model: Llama 3 8B Instruct
+          llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
+            messages: messages,
+            temperature: 0.3,
+            max_tokens: 2500,
+          });
+        }
+
+        const responseText = llmResponse.response || llmResponse;
 
         return new Response(
           JSON.stringify({
             success: true,
-            model: "@cf/meta/llama-3-8b-instruct",
+            model: "@cf/meta/llama-3.1-8b-instruct",
             result: llmResponse,
-            response: llmResponse.response || llmResponse,
+            response: responseText,
           }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );

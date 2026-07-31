@@ -7,7 +7,6 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 load_dotenv()
 
-# Helper to sanitize placeholder strings from env variables
 def get_clean_env(key: str, default: str = "") -> str:
     val = os.getenv(key, default).strip()
     if not val or "your_" in val.lower() or "placeholder" in val.lower() or "xxx" in val.lower():
@@ -35,16 +34,16 @@ VECTOR_DB_DIR.mkdir(parents=True, exist_ok=True)
 
 HISTORY_DB_PATH = DATA_DIR / "chat_history.db"
 
-# Cloudflare Workers AI settings (Sanitized against dummy placeholders)
+# Cloudflare Workers AI settings
 CLOUDFLARE_ACCOUNT_ID = get_clean_env("CLOUDFLARE_ACCOUNT_ID")
 CLOUDFLARE_API_TOKEN = get_clean_env("CLOUDFLARE_API_TOKEN")
 
-# Models
+# Models (Updated to active Llama 3.1 8B Instruct model)
 CLOUDFLARE_EMBEDDING_MODEL = os.getenv(
     "CLOUDFLARE_EMBEDDING_MODEL", "@cf/baai/bge-large-en-v1.5"
 )
 CLOUDFLARE_LLM_MODEL = os.getenv(
-    "CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3-8b-instruct"
+    "CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3.1-8b-instruct"
 )
 
 # API Host & Port
