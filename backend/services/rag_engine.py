@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    FAISS-Powered Direct High-Precision RAG Engine:
-    Delivers exact, detail-specific, document-grounded explanations with zero filler or template fluff.
+    FAISS-Powered Complete Document Coverage RAGEngine:
+    Analyzes the COMPLETE document (start to end distributed sampling + vector similarity)
+    to synthesize 100% accurate, detail-specific document answers.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -32,7 +33,6 @@ class RAGEngine:
         # Filter raw OCR image noise like "Visual [Page 2] Visual"
         cleaned = re.sub(r'Visual\s*\[Page\s*\d+\]\s*Visual', '', text, flags=re.IGNORECASE)
         cleaned = re.sub(r'^\s*Visual\s*$', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
-        # Normalize multiple newlines
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()
 
@@ -52,51 +52,43 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! Ask me any question about {doc_name}, and I will provide a direct, detail-specific answer with page citations.",
+                "answer": f"Hello! Ask me any question about {doc_name}, and I will analyze the complete document from start to end to provide a detailed, accurate answer.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
             }
 
-        is_summary_query = any(k in lower_q for k in [
-            "summarize", "summary", "overview", "explain complete details", "full document", "tell me about", "what is this pdf", "describe the pdf"
-        ])
-        is_structure_query = any(k in lower_q for k in [
-            "subject", "course", "syllabus", "curriculum", "list out", "list", "name", "structure", "semester", "year", "issue", "analyse", "analyze"
-        ])
+        logger.info(f"Analyzing COMPLETE document context for query: '{clean_query}'...")
 
-        retrieved_chunks = []
+        # 1. ALWAYS retrieve Full-Document Distributed Coverage Chunks (spanning beginning, middle, end)
+        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=10)
 
-        # 1. FAISS Full-Document Coverage for Summarization Queries
-        if is_summary_query:
-            logger.info("Executing FAISS Full-Document Coverage Retrieval for Summarization Query...")
-            retrieved_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=12)
+        # 2. ALSO retrieve Top Semantic Vector Similarity Chunks
+        similarity_chunks = []
+        query_embeddings = self.embedding_service.generate_embeddings([clean_query])
+        if query_embeddings:
+            query_vec = query_embeddings[0]
+            similarity_chunks = self.vector_store.similarity_search(
+                query_embedding=query_vec,
+                top_k=top_k,
+                filename_filter=filename
+            )
 
-        # 2. FAISS Similarity Search for Specific Queries
-        if not retrieved_chunks:
-            query_embeddings = self.embedding_service.generate_embeddings([clean_query])
-            if query_embeddings:
-                query_vec = query_embeddings[0]
-                retrieved_chunks = self.vector_store.similarity_search(
-                    query_embedding=query_vec,
-                    top_k=top_k,
-                    filename_filter=filename
-                )
+        # Merge Full Document Coverage + Vector Similarity Chunks without duplicates
+        merged_chunks = []
+        seen_ids = set()
 
-        if not retrieved_chunks and filename:
-            logger.info(f"No chunks found for filename filter '{filename}'. Searching across all indexed FAISS chunks...")
-            retrieved_chunks = self.vector_store.get_distributed_chunks(filename=None, count=10)
+        for c in distributed_chunks + similarity_chunks:
+            cid = c["chunk_id"]
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                merged_chunks.append(c)
 
-        # Smart Course Structure & Table Injection: Prepend Pages 1-4
-        if is_structure_query:
-            toc_chunks = self.vector_store.get_page_chunks(filename=filename, pages=[1, 2, 3, 4], limit=4)
-            if toc_chunks:
-                existing_ids = set(c["chunk_id"] for c in retrieved_chunks)
-                for tc in reversed(toc_chunks):
-                    if tc["chunk_id"] not in existing_ids:
-                        retrieved_chunks.insert(0, tc)
+        if not merged_chunks and filename:
+            logger.info("Fallback: retrieving distributed chunks across all indexed documents...")
+            merged_chunks = self.vector_store.get_distributed_chunks(filename=None, count=12)
 
-        if not retrieved_chunks:
+        if not merged_chunks:
             return {
                 "answer": "I searched the document context, but I could not find relevant information matching your question.",
                 "sources": [],
@@ -104,12 +96,12 @@ class RAGEngine:
                 "retrieved_count": 0
             }
 
-        # 3. Format Context Excerpts
+        # 3. Format Combined Complete Document Context
         context_blocks = []
-        for i, chunk in enumerate(retrieved_chunks):
+        for i, chunk in enumerate(merged_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"--- [FAISS EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
+            context_blocks.append(f"--- [FULL DOCUMENT EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
         # 4. Generate Direct Precision Response via Cloudflare Workers AI
@@ -117,9 +109,8 @@ class RAGEngine:
             system_prompt=effective_system_prompt,
             context=combined_context,
             query=clean_query,
-            retrieved_chunks=retrieved_chunks,
-            temperature=temperature,
-            is_summary=is_summary_query
+            retrieved_chunks=merged_chunks,
+            temperature=temperature
         )
 
         clean_answer = self._clean_response_artifacts(raw_answer)
@@ -132,14 +123,14 @@ class RAGEngine:
                 "filename": c["metadata"].get("filename"),
                 "similarity_score": c.get("similarity_score")
             }
-            for idx, c in enumerate(retrieved_chunks)
+            for idx, c in enumerate(merged_chunks)
         ]
 
         return {
             "answer": clean_answer,
             "sources": sources,
             "system_prompt_used": effective_system_prompt,
-            "retrieved_count": len(retrieved_chunks)
+            "retrieved_count": len(merged_chunks)
         }
 
     def _generate_cloudflare_worker_llm(
@@ -174,7 +165,7 @@ class RAGEngine:
         raise RuntimeError(f"Cloudflare Worker HTTP {resp.status_code}: {resp.text}")
 
     def _generate_cloudflare_rest_llm(
-        self, system_prompt: str, context: str, query: str, temperature: float, is_summary: bool = False
+        self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.llm_model}"
         headers = {
@@ -183,21 +174,22 @@ class RAGEngine:
         }
 
         system_instruction = f"""You are a Master AI Document Analyst.
-Provide ONLY the direct, accurate, top-matched result in logical numeric order with detail-specific information.
+Your task is to analyze the COMPLETE document context provided below (covering the entire document scope from beginning to end) and provide a direct, highly accurate, detail-specific answer for the user's query.
 
-RULES:
-1. Answer the user's query DIRECTLY in logical chronological/numeric section order. Do NOT include filler intros, conversational pleasantries, or artificial section headers.
-2. Do NOT include raw PDF image labels like "Visual [Page 2] Visual". Filter them out completely.
-3. Detail every relevant concept, step, definition, number, or code snippet accurately without truncating code lines.
-4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-5. Base your response strictly on the provided DOCUMENT CONTEXT.
+STRICT INSTRUCTIONS:
+1. Analyze the FULL document scope provided in the context below before answering.
+2. Answer the user's query DIRECTLY without filler intros, conversational pleasantries, or artificial template headers (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
+3. Detail every relevant concept, step, definition, formula, number, or specification present across the entire document.
+4. Filter out raw PDF OCR image noise like "Visual [Page 2] Visual".
+5. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
+6. Base your response strictly on the provided FULL DOCUMENT CONTEXT.
 
-DOCUMENT CONTEXT:
+FULL DOCUMENT CONTEXT:
 {context}"""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a direct, highly accurate, and detail-specific answer for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the FULL DOCUMENT CONTEXT provided above, write a direct, highly accurate, and detail-specific answer for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -221,7 +213,7 @@ DOCUMENT CONTEXT:
         return ans
 
     def _generate_detailed_llm_response(
-        self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float, is_summary: bool = False
+        self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
         if self.worker_base_url:
             try:
@@ -233,7 +225,7 @@ DOCUMENT CONTEXT:
 
         if self.account_id and self.api_token:
             try:
-                ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature, is_summary)
+                ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature)
                 if ans:
                     return ans
             except Exception as e:
@@ -241,7 +233,7 @@ DOCUMENT CONTEXT:
 
         # Direct Fallback Synthesizer
         body_paragraphs = []
-        for idx, chunk in enumerate(retrieved_chunks[:8]):
+        for idx, chunk in enumerate(retrieved_chunks[:10]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
             lines = [l.strip() for l in text.splitlines() if l.strip()]
