@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 class RAGEngine:
     """
     FAISS-Powered High-Precision RAGEngine:
-    Prioritizes query-specific semantic vector search matches to ensure distinct,
-    exact, and relevant answers for every individual question.
+    Prioritizes query-specific semantic vector search matches and calls Cloudflare Workers AI
+    to deliver intelligent, ChatGPT-quality responses without raw chunk headers.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -24,15 +24,16 @@ class RAGEngine:
         self.vector_store = vector_store
         self.account_id = CLOUDFLARE_ACCOUNT_ID
         self.api_token = CLOUDFLARE_API_TOKEN
-        self.llm_model = CLOUDFLARE_LLM_MODEL
+        self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct"
         self.worker_base_url = WORKER_BASE_URL
 
     def _clean_response_artifacts(self, text: str) -> str:
         if not text:
             return ""
-        # Filter raw OCR image noise like "Visual [Page 2] Visual"
+        # Filter raw OCR image noise & ugly chunk header prefixes
         cleaned = re.sub(r'Visual\s*\[Page\s*\d+\]\s*Visual', '', text, flags=re.IGNORECASE)
         cleaned = re.sub(r'^\s*Visual\s*$', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
+        cleaned = re.sub(r'^\s*Page\s*\d+\s*\[Page\s*\d+\]\s*', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()
 
@@ -76,15 +77,13 @@ class RAGEngine:
         # 2. Retrieve Distributed Coverage Chunks for broad context
         distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
 
-        # Priority Order: Similarity Chunks FIRST (Query Specific), then Distributed Chunks
+        # Priority Order: Similarity Chunks FIRST for specific questions
         merged_chunks = []
         seen_ids = set()
 
         if is_summary_query:
-            # For summary queries, give distributed coverage priority
             ordered = distributed_chunks + similarity_chunks
         else:
-            # For specific questions (e.g. "list out game rules"), give SIMILARITY CHUNKS TOP PRIORITY!
             ordered = similarity_chunks + distributed_chunks
 
         for c in ordered:
@@ -105,20 +104,20 @@ class RAGEngine:
                 "retrieved_count": 0
             }
 
-        # 3. Format Combined Context with Top Semantic Matches FIRST
+        # 3. Format Context Excerpts cleanly
         context_blocks = []
-        for i, chunk in enumerate(merged_chunks[:10]):
+        for i, chunk in enumerate(merged_chunks[:8]):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"--- [FAISS MATCH {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
+            context_blocks.append(f"--- [DOCUMENT EXCERPT {i+1} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Query-Specific Response via Cloudflare Workers AI
+        # 4. Generate High-Quality LLM Response via Cloudflare Workers AI
         raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
             query=clean_query,
-            retrieved_chunks=merged_chunks[:10],
+            retrieved_chunks=merged_chunks[:8],
             temperature=temperature
         )
 
@@ -132,7 +131,7 @@ class RAGEngine:
                 "filename": c["metadata"].get("filename"),
                 "similarity_score": c.get("similarity_score")
             }
-            for idx, c in enumerate(merged_chunks[:10])
+            for idx, c in enumerate(merged_chunks[:8])
         ]
 
         return {
@@ -182,23 +181,19 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        system_instruction = f"""You are a Master AI Document Analyst.
-Your task is to answer the SPECIFIC USER QUERY directly, accurately, and thoroughly using the provided Document Context.
+        system_instruction = f"""You are an expert AI Document Analyst.
+Synthesize the provided Document Context into a clear, intelligent, well-structured answer.
 
 STRICT INSTRUCTIONS:
-1. Focus SPECIFICALLY and ONLY on answering the user's exact query: "{query}".
-2. Do NOT repeat previous general summaries or unrelated document intros. Answer only what is asked.
-3. Detail every relevant concept, rule, step, definition, or specification matching the query.
-4. Filter out raw PDF OCR image labels like "Visual [Page 2] Visual".
-5. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-6. Base your response strictly on the provided DOCUMENT CONTEXT.
-
-DOCUMENT CONTEXT:
-{context}"""
+1. Directly answer the user's question: "{query}".
+2. Do NOT output raw chunk headers (do NOT print "Page 1 [Page 1]" or "Tensor [Page 1]").
+3. Explain concepts, rules, modules, and topics thoroughly using bullet points and clear paragraphs.
+4. Cite page numbers naturally in the text (e.g. [Page 1], [Page 2]).
+5. Base your response strictly on the provided DOCUMENT CONTEXT."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided document context, write a direct, detail-specific answer answering:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided document context, write a clear, well-structured answer for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -207,7 +202,7 @@ DOCUMENT CONTEXT:
             "max_tokens": 2500
         }
 
-        logger.info(f"Calling Cloudflare Workers AI LLM model '{self.llm_model}'...")
+        logger.info(f"Calling Cloudflare Workers AI REST API model '{self.llm_model}'...")
         resp = requests.post(url, headers=headers, json=payload, timeout=50)
         
         if resp.status_code != 200:
@@ -224,32 +219,35 @@ DOCUMENT CONTEXT:
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
-        if self.worker_base_url:
-            try:
-                ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
-                if ans:
-                    return ans
-            except Exception as e:
-                logger.warning(f"Cloudflare Worker AI link call failed: {e}")
-
+        # Priority 1: Direct Cloudflare REST API call if credentials present
         if self.account_id and self.api_token:
             try:
                 ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature)
-                if ans:
+                if ans and len(ans) > 20:
                     return ans
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Direct Fallback Synthesizer
-        body_paragraphs = []
-        for idx, chunk in enumerate(retrieved_chunks[:8]):
+        # Priority 2: Worker Base URL call
+        if self.worker_base_url:
+            try:
+                ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
+                if ans and len(ans) > 20:
+                    return ans
+            except Exception as e:
+                logger.warning(f"Cloudflare Worker AI link call failed: {e}")
+
+        # Clean Factual Fallback Synthesizer (No "Page 1 [Page 1]" snippet dumps)
+        body_items = []
+        for idx, chunk in enumerate(retrieved_chunks[:6]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            cleaned_text = " ".join([l.strip() for l in text.splitlines() if l.strip()])
 
-            if lines:
-                heading = lines[0][:70] if len(lines[0]) < 70 else f"Page {page_num}"
-                body = " ".join(lines[1:]) if len(lines) > 1 else lines[0]
-                body_paragraphs.append(f"{idx+1}. **{heading}** [Page {page_num}]\n{body}")
+            if cleaned_text:
+                body_items.append(f"• **Key Topic (Page {page_num})**: {cleaned_text}")
 
-        return "\n\n".join(body_paragraphs)
+        if body_items:
+            return f"Based on the document context, here are the key details for **\"{query}\"**:\n\n" + "\n\n".join(body_items)
+
+        return f"I analyzed the document context for **\"{query}\"**, but could not generate a complete summary."
