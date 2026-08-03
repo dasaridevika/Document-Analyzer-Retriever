@@ -1,7 +1,15 @@
 import os
+import sys
 import time
 import logging
+from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+# Insert project root to sys.path before any relative package imports
+BASE_ROOT = Path(__file__).resolve().parent.parent
+if str(BASE_ROOT) not in sys.path:
+    sys.path.insert(0, str(BASE_ROOT))
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response

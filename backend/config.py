@@ -1,5 +1,12 @@
 import os
+import sys
 from pathlib import Path
+
+# Insert project root to sys.path before any relative package imports
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 from dotenv import load_dotenv
 
 # Disable ChromaDB anonymous telemetry logs
@@ -12,9 +19,6 @@ def get_clean_env(key: str, default: str = "") -> str:
     if not val or val.lower() in ["none", "null", "undefined"]:
         return ""
     return val
-
-# Base directories
-BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Detect Railway Persistent Volume Storage Mount Path
 env_data_dir = get_clean_env("DATA_DIR") or get_clean_env("RAILWAY_VOLUME_MOUNT_PATH")
