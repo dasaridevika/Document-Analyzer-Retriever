@@ -26,6 +26,16 @@ class RAGEngine:
         self.llm_model = CLOUDFLARE_LLM_MODEL
         self.worker_base_url = WORKER_BASE_URL
 
+    def _clean_response_artifacts(self, text: str) -> str:
+        if not text:
+            return ""
+        # Filter raw OCR image noise like "Visual [Page 2] Visual"
+        cleaned = re.sub(r'Visual\s*\[Page\s*\d+\]\s*Visual', '', text, flags=re.IGNORECASE)
+        cleaned = re.sub(r'^\s*Visual\s*$', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
+        # Normalize multiple newlines
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        return cleaned.strip()
+
     def answer_query(
         self,
         query: str,
@@ -103,7 +113,7 @@ class RAGEngine:
         combined_context = "\n\n".join(context_blocks)
 
         # 4. Generate Direct Precision Response via Cloudflare Workers AI
-        answer = self._generate_detailed_llm_response(
+        raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
             query=clean_query,
@@ -111,6 +121,8 @@ class RAGEngine:
             temperature=temperature,
             is_summary=is_summary_query
         )
+
+        clean_answer = self._clean_response_artifacts(raw_answer)
 
         sources = [
             {
@@ -124,7 +136,7 @@ class RAGEngine:
         ]
 
         return {
-            "answer": answer,
+            "answer": clean_answer,
             "sources": sources,
             "system_prompt_used": effective_system_prompt,
             "retrieved_count": len(retrieved_chunks)
@@ -171,12 +183,12 @@ class RAGEngine:
         }
 
         system_instruction = f"""You are a Master AI Document Analyst.
-Provide ONLY the direct, accurate, top-matched result with detail-specific information.
+Provide ONLY the direct, accurate, top-matched result in logical numeric order with detail-specific information.
 
 RULES:
-1. Answer the user's query DIRECTLY. Do NOT include filler intros, conversational pleasantries, or artificial section headers (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
-2. Detail every relevant concept, step, definition, number, or specification present in the context.
-3. Use clear bullet points or bold text where helpful for readability.
+1. Answer the user's query DIRECTLY in logical chronological/numeric section order. Do NOT include filler intros, conversational pleasantries, or artificial section headers.
+2. Do NOT include raw PDF image labels like "Visual [Page 2] Visual". Filter them out completely.
+3. Detail every relevant concept, step, definition, number, or code snippet accurately without truncating code lines.
 4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
 5. Base your response strictly on the provided DOCUMENT CONTEXT.
 
@@ -185,7 +197,7 @@ DOCUMENT CONTEXT:
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a direct, detail-specific answer for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a direct, highly accurate, and detail-specific answer for:\n\n\"{query}\""}
         ]
 
         payload = {
