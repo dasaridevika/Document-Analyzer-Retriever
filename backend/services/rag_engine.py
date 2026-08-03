@@ -14,9 +14,8 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    FAISS-Powered High-Precision Master AI RAG Engine:
-    Uses FAISS IndexFlatIP Cosine Retrieval & Cloudflare Workers AI (Llama 3.1 8B Instruct)
-    to output professional, beautifully structured Markdown answers like ChatGPT.
+    FAISS-Powered Plain Text RAG Engine:
+    Delivers exact, accurate, and comprehensive document-backed explanations in clean, natural text paragraphs.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -43,7 +42,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your FAISS-powered AI Master Document Assistant. Ask me to analyze {doc_name}, list out issues, or explain any topic, and I will deliver an accurate, beautifully structured response with page citations.",
+                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the full document to provide a detailed, accurate explanation in clear text paragraphs.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -89,7 +88,7 @@ class RAGEngine:
 
         if not retrieved_chunks:
             return {
-                "answer": "I searched the FAISS index, but I could not find relevant information matching your question in the document.",
+                "answer": "I searched the document, but I could not find relevant information matching your question.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -103,7 +102,7 @@ class RAGEngine:
             context_blocks.append(f"--- [FAISS EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Professional Markdown Response via Cloudflare Workers AI
+        # 4. Generate Plain Text Response via Cloudflare Workers AI
         answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -130,6 +129,15 @@ class RAGEngine:
             "system_prompt_used": effective_system_prompt,
             "retrieved_count": len(retrieved_chunks)
         }
+
+    def _clean_markdown_symbols(self, text: str) -> str:
+        if not text:
+            return ""
+        # Remove ###, ####, **, and raw markdown tags
+        clean = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+        clean = re.sub(r'\*\*(.*?)\*\*', r'\1', clean)
+        clean = re.sub(r'\*(.*?)\*', r'\1', clean)
+        return clean.strip()
 
     def _generate_cloudflare_worker_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
@@ -158,7 +166,7 @@ class RAGEngine:
             )
             if isinstance(ans, str) and len(ans.strip()) > 10:
                 logger.info("Successfully generated LLM response via Cloudflare Worker AI link!")
-                return ans.strip()
+                return self._clean_markdown_symbols(ans.strip())
 
         raise RuntimeError(f"Cloudflare Worker HTTP {resp.status_code}: {resp.text}")
 
@@ -171,21 +179,22 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        system_instruction = f"""You are a Master AI Document Analyst & Technical Educator.
-Your task is to provide exact, highly accurate, detail-specific answers formatted in professional, elegant GitHub Markdown like ChatGPT.
+        system_instruction = f"""You are an expert AI Document Assistant.
+Your goal is to provide clear, thorough, and highly accurate explanations written in clean, plain text paragraphs.
 
-PROFESSIONAL MARKDOWN FORMATTING RULES:
-1. **Executive Summary**: Start with a clear callout summary answering the user's prompt directly.
-2. **Structured Breakdown / List Out**: If the user asks to "list out", "analyse", or "find issues", present EVERY item clearly using bold section titles, bullet points, and numbered lists.
-3. **Bold Terms & Page Citations**: Bold key concepts, terms, and numbers. Cite exact page numbers naturally (e.g., [Page 4], [Page 12]).
-4. **Accuracy Guarantee**: Base your answer strictly on the provided FAISS document excerpts. Never make up unverified information.
+RULES:
+1. Do NOT use markdown symbols like ###, ####, **, --, or raw formatting tags.
+2. Write in fluent, natural, well-developed text paragraphs.
+3. Detail every concept, step, definition, and data point clearly.
+4. Cite page numbers naturally in plain text (e.g. (Page 4), (Page 12)).
+5. Base your response strictly on the provided document context.
 
 DOCUMENT CONTEXT:
 {context}"""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a comprehensive, professional Markdown response for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided document context, write a detailed plain text answer in natural paragraphs for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -206,7 +215,7 @@ DOCUMENT CONTEXT:
 
         result = data.get("result", {})
         ans = result.get("response", "").strip()
-        return ans
+        return self._clean_markdown_symbols(ans)
 
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float, is_summary: bool = False
@@ -227,28 +236,23 @@ DOCUMENT CONTEXT:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Master Professional Markdown Synthesizer Fallback
+        # Plain Text Fallback Synthesizer
         pages_referenced = sorted(list(set([
             c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
         ])))
         page_str = f" (Pages {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
 
         paragraphs = [
-            f"### 🎯 Executive Summary\nBased on an exact analysis of the FAISS-indexed document context{page_str}, here is the detailed breakdown answering **\"{query}\"**:\n"
+            f"Based on an analysis of the document context{page_str}, here is the breakdown for \"{query}\":\n"
         ]
 
         body_paragraphs = []
         for idx, chunk in enumerate(retrieved_chunks[:8]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            
-            if lines:
-                heading = lines[0][:70] if len(lines[0]) < 70 else f"Section Breakdown (Page {page_num})"
-                body = " ".join(lines[1:]) if len(lines) > 1 else lines[0]
-                body_paragraphs.append(f"#### {idx+1}. **{heading}** *(Page {page_num})*\n{body}")
+            clean_text = " ".join([l.strip() for l in text.splitlines() if l.strip()])
+            if clean_text:
+                body_paragraphs.append(f"Section (Page {page_num}): {clean_text}")
 
         paragraphs.append("\n\n".join(body_paragraphs))
-        paragraphs.append("\n\n### 📌 Key Takeaways & Summary\n- **Accuracy Guaranteed**: Retrieved directly from FAISS vector search across your document.\n- **Page Citations**: All facts reference exact document page numbers.")
-
         return "\n\n".join(paragraphs)

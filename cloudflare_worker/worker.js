@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Optimized for High-Precision, Detail-Specific & Accurate Responses (Temperature: 0.1)
+ * Formatted for Clean, Plain Text Paragraph Responses (No ### Markdown symbols)
  */
 
 export default {
@@ -54,7 +54,7 @@ export default {
         );
       }
 
-      // 2. HIGH-PRECISION DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. PLAIN TEXT PARAGRAPH LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ error: "Method not allowed" }), {
@@ -66,15 +66,15 @@ export default {
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        const masterDetailSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
-Your goal is to provide exact, highly detailed, precise, and specific answers based strictly on the provided Document Context.
+        const plainTextSystemPrompt = system_prompt || `You are an expert AI Document Assistant.
+Your goal is to provide comprehensive, detailed, and highly accurate explanations written in clean, plain text paragraphs.
 
-STRICT INSTRUCTIONS FOR ACCURATE & DETAIL-SPECIFIC ANSWERS:
-1. Base your answer ONLY on facts, definitions, numbers, formulas, names, and concepts directly stated in the DOCUMENT CONTEXT.
-2. Provide comprehensive, multi-paragraph explanations that thoroughly detail EVERY relevant topic, module, step, or item mentioned in the text.
-3. Use bold headings, bullet points, and numbered lists where appropriate to organize detailed information clearly.
-4. Always cite specific page numbers whenever mentioned in the context (e.g. [Page 4], [Page 12]).
-5. If the context does not contain enough information to answer fully, explicitly state what is present and what is missing. Never make up unverified information.`;
+STRICT FORMATTING RULES:
+1. Do NOT use markdown symbols like ###, ####, **, --, or raw formatting tags.
+2. Write in fluent, natural, well-developed text paragraphs.
+3. Detail every concept, step, definition, and data point clearly and thoroughly.
+4. Cite page numbers naturally in plain text (e.g. (Page 4), (Page 12)).
+5. Base your response strictly on the provided document context without hallucinating.`;
 
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
@@ -82,24 +82,22 @@ STRICT INSTRUCTIONS FOR ACCURATE & DETAIL-SPECIFIC ANSWERS:
         const messages = [
           {
             role: "system",
-            content: `${masterDetailSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
+            content: `${plainTextSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, provide a comprehensive, highly accurate, and detail-specific answer for:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a detailed plain text answer in natural paragraphs for:\n\n"${userQuestion}"`,
           },
         ];
 
         let llmResponse;
         try {
-          // Temperature 0.1 forces deterministic, exact factual accuracy
           llmResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
             messages: messages,
             temperature: 0.1,
             max_tokens: 2500,
           });
         } catch (mErr) {
-          // Fallback Active Model
           llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
             messages: messages,
             temperature: 0.1,
@@ -107,7 +105,11 @@ STRICT INSTRUCTIONS FOR ACCURATE & DETAIL-SPECIFIC ANSWERS:
           });
         }
 
-        const responseText = llmResponse.response || llmResponse;
+        let responseText = llmResponse.response || llmResponse;
+        if (typeof responseText === "string") {
+          // Clean any residual markdown heading symbols
+          responseText = responseText.replace(/^#{1,6}\s+/gm, "").replace(/\*\*/g, "");
+        }
 
         return new Response(
           JSON.stringify({
