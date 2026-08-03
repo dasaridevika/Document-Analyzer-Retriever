@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    Master Full-Document Summarization & High-Precision RAG Engine:
-    Delivers thorough, accurate, multi-section narrative explanations with page citations.
+    High-Precision Detail-Specific Workers AI RAG Engine:
+    Delivers exact, accurate, and comprehensive document-backed explanations with page citations.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -32,7 +32,7 @@ class RAGEngine:
         filename: str = None,
         system_prompt: str = None,
         top_k: int = 8,
-        temperature: float = 0.2
+        temperature: float = 0.1
     ) -> Dict[str, Any]:
         effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         clean_query = query.strip()
@@ -42,7 +42,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, or ask me to summarize it, and I will analyze the full document to provide a detailed, accurate explanation with page citations.",
+                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the full document to provide a detailed, accurate explanation with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -187,14 +187,14 @@ DOCUMENT CONTEXT:
 DOCUMENT CONTEXT:
 {context}
 
-INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
-- Write in fluent, complete, well-written narrative paragraphs just like ChatGPT.
-- Synthesize the information thoroughly, breaking down concepts, definitions, and specific data points into clear prose.
+INSTRUCTIONS FOR DETAILED & ACCURATE RESPONSE:
+- Write in fluent, complete, well-written narrative paragraphs.
+- Synthesize the information thoroughly, detailing every concept, definition, step, and data point present in the text.
 - Cite page numbers naturally in the text (e.g., [Page 4], [Page 12])."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based on the provided document context, write a thorough, accurate, multi-paragraph response for:\n\n{query}"}
+            {"role": "user", "content": f"Based strictly on the provided document context, write a thorough, accurate, and detail-specific answer for:\n\n{query}"}
         ]
 
         payload = {
@@ -236,14 +236,14 @@ INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Master ChatGPT-Style Fluid Paragraph Synthesizer Fallback
+        # Master Detail-Specific Synthesizer Fallback
         pages_referenced = sorted(list(set([
             c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
         ])))
         page_str = f" (Page {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
 
         paragraphs = [
-            f"### Executive Summary\nBased on a comprehensive analysis of the document context{page_str}, here is a detailed explanation answering **\"{query}\"**:\n"
+            f"### Detailed Analysis\nBased on a comprehensive analysis of the document context{page_str}, here is a detailed, detail-specific answer for **\"{query}\"**:\n"
         ]
 
         body_paragraphs = []
@@ -255,6 +255,4 @@ INSTRUCTIONS FOR CHATGPT-STYLE RESPONSE:
                 body_paragraphs.append(f"**Section (Page {page_num})**: {clean_text}")
 
         paragraphs.append("\n\n".join(body_paragraphs))
-
-        paragraphs.append("\n\n### Summary & Key Takeaways\n- This document details core principles, course requirements, and technical topics across all sections.")
         return "\n\n".join(paragraphs)

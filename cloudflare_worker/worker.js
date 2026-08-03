@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Formatted for Fluid, ChatGPT-Style Paragraph Responses
+ * Optimized for High-Precision, Detail-Specific & Accurate Responses (Temperature: 0.1)
  */
 
 export default {
@@ -54,7 +54,7 @@ export default {
         );
       }
 
-      // 2. CHATGPT-STYLE FLUID PARAGRAPH ANALYSIS ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. HIGH-PRECISION DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ error: "Method not allowed" }), {
@@ -66,10 +66,15 @@ export default {
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        const chatGptSystemPrompt = system_prompt || `You are an expert AI Document Assistant.
-Your goal is to provide comprehensive, detailed, and highly accurate explanations formatted in complete, well-written paragraphs like ChatGPT.
-Explain concepts thoroughly, synthesize facts into fluent narrative prose, and cite page numbers naturally within the text.
-Deliver rich, informative responses that answer the user's question completely based on the provided document excerpts.`;
+        const masterDetailSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
+Your goal is to provide exact, highly detailed, precise, and specific answers based strictly on the provided Document Context.
+
+STRICT INSTRUCTIONS FOR ACCURATE & DETAIL-SPECIFIC ANSWERS:
+1. Base your answer ONLY on facts, definitions, numbers, formulas, names, and concepts directly stated in the DOCUMENT CONTEXT.
+2. Provide comprehensive, multi-paragraph explanations that thoroughly detail EVERY relevant topic, module, step, or item mentioned in the text.
+3. Use bold headings, bullet points, and numbered lists where appropriate to organize detailed information clearly.
+4. Always cite specific page numbers whenever mentioned in the context (e.g. [Page 4], [Page 12]).
+5. If the context does not contain enough information to answer fully, explicitly state what is present and what is missing. Never make up unverified information.`;
 
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
@@ -77,25 +82,27 @@ Deliver rich, informative responses that answer the user's question completely b
         const messages = [
           {
             role: "system",
-            content: `${chatGptSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
+            content: `${masterDetailSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
           },
           {
             role: "user",
-            content: `Based on the provided document context, write a thorough, accurate, and detailed multi-paragraph response explaining:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, provide a comprehensive, highly accurate, and detail-specific answer for:\n\n"${userQuestion}"`,
           },
         ];
 
         let llmResponse;
         try {
+          // Temperature 0.1 forces deterministic, exact factual accuracy
           llmResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
             messages: messages,
-            temperature: 0.2,
+            temperature: 0.1,
             max_tokens: 2500,
           });
         } catch (mErr) {
+          // Fallback Active Model
           llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
             messages: messages,
-            temperature: 0.2,
+            temperature: 0.1,
             max_tokens: 2500,
           });
         }
