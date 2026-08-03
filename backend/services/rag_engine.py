@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    FAISS-Powered Complete Document Coverage RAGEngine:
-    Analyzes the COMPLETE document (start to end distributed sampling + vector similarity)
-    to synthesize 100% accurate, detail-specific document answers.
+    FAISS-Powered High-Precision RAGEngine:
+    Prioritizes query-specific semantic vector search matches to ensure distinct,
+    exact, and relevant answers for every individual question.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -52,18 +52,17 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! Ask me any question about {doc_name}, and I will analyze the complete document from start to end to provide a detailed, accurate answer.",
+                "answer": f"Hello! Ask me any question about {doc_name}, and I will provide a direct, detail-specific answer with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
             }
 
-        logger.info(f"Analyzing COMPLETE document context for query: '{clean_query}'...")
+        is_summary_query = any(k in lower_q for k in [
+            "summarize", "summary", "overview", "explain complete details", "full document", "tell me about", "what is this pdf", "describe the pdf"
+        ])
 
-        # 1. ALWAYS retrieve Full-Document Distributed Coverage Chunks (spanning beginning, middle, end)
-        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=10)
-
-        # 2. ALSO retrieve Top Semantic Vector Similarity Chunks
+        # 1. Retrieve Top Semantic Similarity Chunks for the EXACT Query
         similarity_chunks = []
         query_embeddings = self.embedding_service.generate_embeddings([clean_query])
         if query_embeddings:
@@ -74,11 +73,21 @@ class RAGEngine:
                 filename_filter=filename
             )
 
-        # Merge Full Document Coverage + Vector Similarity Chunks without duplicates
+        # 2. Retrieve Distributed Coverage Chunks for broad context
+        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
+
+        # Priority Order: Similarity Chunks FIRST (Query Specific), then Distributed Chunks
         merged_chunks = []
         seen_ids = set()
 
-        for c in distributed_chunks + similarity_chunks:
+        if is_summary_query:
+            # For summary queries, give distributed coverage priority
+            ordered = distributed_chunks + similarity_chunks
+        else:
+            # For specific questions (e.g. "list out game rules"), give SIMILARITY CHUNKS TOP PRIORITY!
+            ordered = similarity_chunks + distributed_chunks
+
+        for c in ordered:
             cid = c["chunk_id"]
             if cid not in seen_ids:
                 seen_ids.add(cid)
@@ -86,7 +95,7 @@ class RAGEngine:
 
         if not merged_chunks and filename:
             logger.info("Fallback: retrieving distributed chunks across all indexed documents...")
-            merged_chunks = self.vector_store.get_distributed_chunks(filename=None, count=12)
+            merged_chunks = self.vector_store.get_distributed_chunks(filename=None, count=10)
 
         if not merged_chunks:
             return {
@@ -96,20 +105,20 @@ class RAGEngine:
                 "retrieved_count": 0
             }
 
-        # 3. Format Combined Complete Document Context
+        # 3. Format Combined Context with Top Semantic Matches FIRST
         context_blocks = []
-        for i, chunk in enumerate(merged_chunks):
+        for i, chunk in enumerate(merged_chunks[:10]):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"--- [FULL DOCUMENT EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
+            context_blocks.append(f"--- [FAISS MATCH {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Direct Precision Response via Cloudflare Workers AI
+        # 4. Generate Query-Specific Response via Cloudflare Workers AI
         raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
             query=clean_query,
-            retrieved_chunks=merged_chunks,
+            retrieved_chunks=merged_chunks[:10],
             temperature=temperature
         )
 
@@ -123,14 +132,14 @@ class RAGEngine:
                 "filename": c["metadata"].get("filename"),
                 "similarity_score": c.get("similarity_score")
             }
-            for idx, c in enumerate(merged_chunks)
+            for idx, c in enumerate(merged_chunks[:10])
         ]
 
         return {
             "answer": clean_answer,
             "sources": sources,
             "system_prompt_used": effective_system_prompt,
-            "retrieved_count": len(merged_chunks)
+            "retrieved_count": len(sources)
         }
 
     def _generate_cloudflare_worker_llm(
@@ -174,22 +183,22 @@ class RAGEngine:
         }
 
         system_instruction = f"""You are a Master AI Document Analyst.
-Your task is to analyze the COMPLETE document context provided below (covering the entire document scope from beginning to end) and provide a direct, highly accurate, detail-specific answer for the user's query.
+Your task is to answer the SPECIFIC USER QUERY directly, accurately, and thoroughly using the provided Document Context.
 
 STRICT INSTRUCTIONS:
-1. Analyze the FULL document scope provided in the context below before answering.
-2. Answer the user's query DIRECTLY without filler intros, conversational pleasantries, or artificial template headers (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
-3. Detail every relevant concept, step, definition, formula, number, or specification present across the entire document.
-4. Filter out raw PDF OCR image noise like "Visual [Page 2] Visual".
+1. Focus SPECIFICALLY and ONLY on answering the user's exact query: "{query}".
+2. Do NOT repeat previous general summaries or unrelated document intros. Answer only what is asked.
+3. Detail every relevant concept, rule, step, definition, or specification matching the query.
+4. Filter out raw PDF OCR image labels like "Visual [Page 2] Visual".
 5. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-6. Base your response strictly on the provided FULL DOCUMENT CONTEXT.
+6. Base your response strictly on the provided DOCUMENT CONTEXT.
 
-FULL DOCUMENT CONTEXT:
+DOCUMENT CONTEXT:
 {context}"""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the FULL DOCUMENT CONTEXT provided above, write a direct, highly accurate, and detail-specific answer for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided document context, write a direct, detail-specific answer answering:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -233,7 +242,7 @@ FULL DOCUMENT CONTEXT:
 
         # Direct Fallback Synthesizer
         body_paragraphs = []
-        for idx, chunk in enumerate(retrieved_chunks[:10]):
+        for idx, chunk in enumerate(retrieved_chunks[:8]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
             lines = [l.strip() for l in text.splitlines() if l.strip()]

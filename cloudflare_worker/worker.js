@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Complete Document Scope Analysis & Direct High-Precision Answers
+ * Query-Specific Precision Answers (No Duplicate Repeated Summaries)
  */
 
 export default {
@@ -54,7 +54,7 @@ export default {
         );
       }
 
-      // 2. COMPLETE DOCUMENT SCOPE ANALYSIS LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. QUERY-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/" || url.pathname === "") {
         if (request.method === "GET") {
           return new Response(JSON.stringify({
@@ -77,29 +77,28 @@ export default {
 
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "", temperature = 0.1 } = body;
-
-        const completeDocPrompt = system_prompt || `You are a Master AI Document Analyst.
-Your task is to analyze the COMPLETE document context provided below (covering the entire document scope from beginning to end) and provide a direct, highly accurate, detail-specific answer for the user's query.
-
-STRICT INSTRUCTIONS:
-1. Analyze the FULL document scope provided in the context below before answering.
-2. Answer the user's query DIRECTLY without filler intros, conversational pleasantries, or artificial section headers (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
-3. Detail every relevant concept, step, definition, formula, number, or specification present across the entire document.
-4. Filter out raw PDF OCR image labels like "Visual [Page 2] Visual".
-5. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-6. Base your response strictly on the provided FULL DOCUMENT CONTEXT without making up unverified information.`;
-
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
+
+        const querySpecificPrompt = system_prompt || `You are a Master AI Document Analyst.
+Your task is to answer the SPECIFIC USER QUERY directly, accurately, and thoroughly using the provided Document Context.
+
+STRICT INSTRUCTIONS:
+1. Focus SPECIFICALLY and ONLY on answering the user's exact query: "${userQuestion}".
+2. Do NOT repeat previous general summaries or unrelated document intros. Answer ONLY what is asked in "${userQuestion}".
+3. Detail every relevant rule, concept, step, definition, formula, number, or specification matching "${userQuestion}".
+4. Filter out raw PDF OCR image labels like "Visual [Page 2] Visual".
+5. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
+6. Base your response strictly on the provided DOCUMENT CONTEXT.`;
 
         const messages = [
           {
             role: "system",
-            content: `${completeDocPrompt}\n\nFULL DOCUMENT CONTEXT:\n${contextContent}`,
+            content: `${querySpecificPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
           },
           {
             role: "user",
-            content: `Based strictly on analyzing the FULL DOCUMENT CONTEXT provided above, provide a direct, highly accurate, detail-specific answer for:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a direct, detail-specific answer answering the exact query:\n\n"${userQuestion}"`,
           },
         ];
 
