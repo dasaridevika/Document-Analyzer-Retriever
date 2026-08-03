@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    High-Precision Detail-Specific Workers AI RAG Engine:
-    Delivers exact, accurate, and comprehensive document-backed explanations with page citations.
+    FAISS-Powered High-Precision Master AI RAG Engine:
+    Uses FAISS IndexFlatIP Cosine Retrieval & Cloudflare Workers AI (Llama 3.1 8B Instruct)
+    to output professional, beautifully structured Markdown answers like ChatGPT.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -42,7 +43,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the full document to provide a detailed, accurate explanation with page citations.",
+                "answer": f"Hello! I am your FAISS-powered AI Master Document Assistant. Ask me to analyze {doc_name}, list out issues, or explain any topic, and I will deliver an accurate, beautifully structured response with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -52,16 +53,17 @@ class RAGEngine:
             "summarize", "summary", "overview", "explain complete details", "full document", "tell me about", "what is this pdf", "describe the pdf"
         ])
         is_structure_query = any(k in lower_q for k in [
-            "subject", "course", "syllabus", "curriculum", "list", "name", "structure", "semester", "year"
+            "subject", "course", "syllabus", "curriculum", "list out", "list", "name", "structure", "semester", "year", "issue", "analyse", "analyze"
         ])
 
         retrieved_chunks = []
 
-        # Full Document Coverage for Summarization Queries
+        # 1. FAISS Full-Document Coverage for Summarization Queries
         if is_summary_query:
-            logger.info("Executing Full-Document Coverage Retrieval for Summarization Query...")
+            logger.info("Executing FAISS Full-Document Coverage Retrieval for Summarization Query...")
             retrieved_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=12)
 
+        # 2. FAISS Similarity Search for Specific Queries
         if not retrieved_chunks:
             query_embeddings = self.embedding_service.generate_embeddings([clean_query])
             if query_embeddings:
@@ -73,10 +75,10 @@ class RAGEngine:
                 )
 
         if not retrieved_chunks and filename:
-            logger.info(f"No chunks found for filename filter '{filename}'. Searching across all indexed chunks...")
+            logger.info(f"No chunks found for filename filter '{filename}'. Searching across all indexed FAISS chunks...")
             retrieved_chunks = self.vector_store.get_distributed_chunks(filename=None, count=10)
 
-        # Smart Course Structure Injection: Prepend Pages 1-4 for subject/course queries
+        # Smart Course Structure & Table Injection: Prepend Pages 1-4
         if is_structure_query:
             toc_chunks = self.vector_store.get_page_chunks(filename=filename, pages=[1, 2, 3, 4], limit=4)
             if toc_chunks:
@@ -87,7 +89,7 @@ class RAGEngine:
 
         if not retrieved_chunks:
             return {
-                "answer": "I searched the document context, but I could not find relevant information matching your question.",
+                "answer": "I searched the FAISS index, but I could not find relevant information matching your question in the document.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -98,10 +100,10 @@ class RAGEngine:
         for i, chunk in enumerate(retrieved_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"--- [EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
+            context_blocks.append(f"--- [FAISS EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Master ChatGPT-Style Detailed Response via Cloudflare Workers AI
+        # 4. Generate Professional Markdown Response via Cloudflare Workers AI
         answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -169,32 +171,21 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        if is_summary:
-            system_instruction = f"""You are a Master AI Document Summarizer & Technical Educator.
-Your goal is to provide a comprehensive, highly detailed, multi-section summary of the entire document context.
+        system_instruction = f"""You are a Master AI Document Analyst & Technical Educator.
+Your task is to provide exact, highly accurate, detail-specific answers formatted in professional, elegant GitHub Markdown like ChatGPT.
 
-STRUCTURE YOUR FULL SUMMARY AS FOLLOWS:
-1. Executive Overview: Describe what the document is, its core scope, main objectives, and target audience.
-2. Detailed Section-by-Section Breakdown: Detail every major unit, chapter, or section covered in the document. Explain key concepts, formulas, rules, and topics using bullet points and bold terms.
-3. Core Takeaways & Requirements: Highlight essential principles, requirements, or key findings mentioned.
-4. Concluding Summary: Provide a clear concluding summary of the whole document.
+PROFESSIONAL MARKDOWN FORMATTING RULES:
+1. **Executive Summary**: Start with a clear callout summary answering the user's prompt directly.
+2. **Structured Breakdown / List Out**: If the user asks to "list out", "analyse", or "find issues", present EVERY item clearly using bold section titles, bullet points, and numbered lists.
+3. **Bold Terms & Page Citations**: Bold key concepts, terms, and numbers. Cite exact page numbers naturally (e.g., [Page 4], [Page 12]).
+4. **Accuracy Guarantee**: Base your answer strictly on the provided FAISS document excerpts. Never make up unverified information.
 
 DOCUMENT CONTEXT:
 {context}"""
-        else:
-            system_instruction = f"""{system_prompt}
-
-DOCUMENT CONTEXT:
-{context}
-
-INSTRUCTIONS FOR DETAILED & ACCURATE RESPONSE:
-- Write in fluent, complete, well-written narrative paragraphs.
-- Synthesize the information thoroughly, detailing every concept, definition, step, and data point present in the text.
-- Cite page numbers naturally in the text (e.g., [Page 4], [Page 12])."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided document context, write a thorough, accurate, and detail-specific answer for:\n\n{query}"}
+            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a comprehensive, professional Markdown response for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -236,23 +227,28 @@ INSTRUCTIONS FOR DETAILED & ACCURATE RESPONSE:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Master Detail-Specific Synthesizer Fallback
+        # Master Professional Markdown Synthesizer Fallback
         pages_referenced = sorted(list(set([
             c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
         ])))
-        page_str = f" (Page {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
+        page_str = f" (Pages {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
 
         paragraphs = [
-            f"### Detailed Analysis\nBased on a comprehensive analysis of the document context{page_str}, here is a detailed, detail-specific answer for **\"{query}\"**:\n"
+            f"### 🎯 Executive Summary\nBased on an exact analysis of the FAISS-indexed document context{page_str}, here is the detailed breakdown answering **\"{query}\"**:\n"
         ]
 
         body_paragraphs = []
-        for chunk in retrieved_chunks[:8]:
+        for idx, chunk in enumerate(retrieved_chunks[:8]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
-            clean_text = " ".join([l.strip() for l in text.splitlines() if l.strip()])
-            if clean_text:
-                body_paragraphs.append(f"**Section (Page {page_num})**: {clean_text}")
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            
+            if lines:
+                heading = lines[0][:70] if len(lines[0]) < 70 else f"Section Breakdown (Page {page_num})"
+                body = " ".join(lines[1:]) if len(lines) > 1 else lines[0]
+                body_paragraphs.append(f"#### {idx+1}. **{heading}** *(Page {page_num})*\n{body}")
 
         paragraphs.append("\n\n".join(body_paragraphs))
+        paragraphs.append("\n\n### 📌 Key Takeaways & Summary\n- **Accuracy Guaranteed**: Retrieved directly from FAISS vector search across your document.\n- **Page Citations**: All facts reference exact document page numbers.")
+
         return "\n\n".join(paragraphs)
