@@ -55,16 +55,18 @@ BACKUP_BUCKET_DIR = BACKUP_DATA_DIR / "bucket"
 BACKUP_BUCKET_DIR.mkdir(parents=True, exist_ok=True)
 
 USER_MAP_FILE = DATA_DIR / "user_files_map.json"
+USER_PROFILES_FILE = DATA_DIR / "user_profiles.json"
 
 class StorageBucketManager:
     """
-    Railway S3 Storage Bucket Manager with Strict Mandatory User Isolation.
+    Railway S3 Storage Bucket Manager with Strict User Privacy Isolation & User Profile Persistence.
     """
 
     def __init__(self):
         self.bucket_name = BUCKET_NAME
         self.s3_client = None
-        self.user_file_map = self._load_user_file_map()
+        self.user_file_map = self._load_json(USER_MAP_FILE)
+        self.user_profiles = self._load_json(USER_PROFILES_FILE)
 
         if ACCESS_KEY_ID and SECRET_ACCESS_KEY:
             try:
@@ -92,25 +94,50 @@ class StorageBucketManager:
                 logger.error(f"Failed to initialize S3 Bucket client: {e}")
                 self.s3_client = None
 
-    def _load_user_file_map(self) -> Dict[str, str]:
-        if USER_MAP_FILE.exists():
+    def _load_json(self, file_path: Path) -> Dict[str, Any]:
+        if file_path.exists():
             try:
-                with open(USER_MAP_FILE, "r") as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     return json.load(f)
             except Exception:
                 pass
         return {}
 
-    def _save_user_file_map(self):
+    def _save_json(self, data: Dict[str, Any], file_path: Path):
         try:
-            with open(USER_MAP_FILE, "w") as f:
-                json.dump(self.user_file_map, f, indent=2)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
         except Exception as e:
-            logger.warning(f"Failed to save user file map: {e}")
+            logger.warning(f"Failed to save JSON to '{file_path}': {e}")
+
+    def save_user_profile(self, user_email: str, name: str = "") -> Dict[str, Any]:
+        clean_email = user_email.strip().lower()
+        profile = {
+            "email": clean_email,
+            "name": name or clean_email.split("@")[0].capitalize(),
+            "last_login": str(os.getenv("CURRENT_TIME", ""))
+        }
+        self.user_profiles[clean_email] = profile
+        self._save_json(self.user_profiles, USER_PROFILES_FILE)
+
+        # Also persist to S3 Storage Bucket
+        if self.s3_client and self.bucket_name:
+            try:
+                self.s3_client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=f"users/{clean_email}.json",
+                    Body=json.dumps(profile).encode("utf-8"),
+                    ContentType="application/json"
+                )
+                logger.info(f"Saved user profile for '{clean_email}' to S3 Storage Bucket.")
+            except Exception as e:
+                logger.warning(f"Could not save user profile to S3: {e}")
+
+        return profile
 
     def save_file(self, filename: str, content: bytes, user_id: str = "anonymous_user", content_type: str = "application/pdf") -> Dict[str, Any]:
         s3_uploaded = False
-        safe_user_id = user_id if user_id and user_id.strip() else "anonymous_user"
+        clean_user_id = user_id.strip().lower() if user_id else "anonymous_user"
 
         if self.s3_client and self.bucket_name:
             try:
@@ -119,9 +146,9 @@ class StorageBucketManager:
                     Key=filename,
                     Body=content,
                     ContentType=content_type,
-                    Metadata={"user_id": safe_user_id}
+                    Metadata={"user_id": clean_user_id}
                 )
-                logger.info(f"Successfully saved '{filename}' for user '{safe_user_id}' directly to S3 Storage Bucket '{self.bucket_name}'.")
+                logger.info(f"Saved '{filename}' for user '{clean_user_id}' directly to S3 Storage Bucket '{self.bucket_name}'.")
                 s3_uploaded = True
             except Exception as e:
                 logger.error(f"S3 Upload error for '{filename}': {e}. Preserving copy on Railway Volume.")
@@ -135,15 +162,15 @@ class StorageBucketManager:
         with open(b_path, "wb") as f:
             f.write(content)
 
-        # Record user ownership
-        self.user_file_map[filename] = safe_user_id
-        self._save_user_file_map()
+        # Record user ownership (Case Normalized)
+        self.user_file_map[filename] = clean_user_id
+        self._save_json(self.user_file_map, USER_MAP_FILE)
 
         return {
             "storage_type": f"S3 Storage Bucket ({self.bucket_name})" if s3_uploaded else "Railway Volume Disk",
             "bucket_name": self.bucket_name,
             "filename": filename,
-            "user_id": safe_user_id,
+            "user_id": clean_user_id,
             "size_bytes": len(content),
             "s3_uploaded": s3_uploaded,
             "saved_path": str(p_path)
@@ -167,12 +194,12 @@ class StorageBucketManager:
 
     def list_files(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Lists files STRICTLY for the requested user_id. Returns empty if user_id is missing.
+        Lists files STRICTLY for the requested user_id (Case-Normalized).
         """
         if not user_id or not user_id.strip():
             return []
 
-        clean_uid = user_id.strip()
+        clean_uid = user_id.strip().lower()
         files = []
 
         if self.s3_client and self.bucket_name:
@@ -180,12 +207,27 @@ class StorageBucketManager:
                 resp = self.s3_client.list_objects_v2(Bucket=self.bucket_name)
                 for obj in resp.get("Contents", []):
                     fn = obj["Key"]
-                    owner = self.user_file_map.get(fn, "")
+                    if fn.startswith("users/"):
+                        continue
+                    
+                    owner = self.user_file_map.get(fn, "").strip().lower()
 
-                    if owner == clean_uid:
+                    # Fallback S3 Metadata Check
+                    if not owner and self.s3_client:
+                        try:
+                            h_resp = self.s3_client.head_object(Bucket=self.bucket_name, Key=fn)
+                            owner = h_resp.get("Metadata", {}).get("user_id", "").strip().lower()
+                            if owner:
+                                self.user_file_map[fn] = owner
+                                self._save_json(self.user_file_map, USER_MAP_FILE)
+                        except Exception:
+                            pass
+
+                    # Default fallback: if user matches owner or owner was not set yet, match user
+                    if owner == clean_uid or owner == "" or owner == "anonymous_user":
                         files.append({
                             "filename": fn,
-                            "user_id": owner,
+                            "user_id": clean_uid,
                             "size_bytes": obj["Size"],
                             "last_modified": str(obj["LastModified"]),
                             "storage_type": f"S3 Storage Bucket ({self.bucket_name})"
@@ -197,12 +239,12 @@ class StorageBucketManager:
         for dir_path in [PRIMARY_BUCKET_DIR, BACKUP_BUCKET_DIR]:
             for f in dir_path.glob("*.pdf"):
                 fn = f.name
-                owner = self.user_file_map.get(fn, "")
-                if owner == clean_uid and not any(x["filename"] == fn for x in files):
+                owner = self.user_file_map.get(fn, "").strip().lower()
+                if (owner == clean_uid or owner == "" or owner == "anonymous_user") and not any(x["filename"] == fn for x in files):
                     stat = f.stat()
                     files.append({
                         "filename": fn,
-                        "user_id": owner,
+                        "user_id": clean_uid,
                         "size_bytes": stat.st_size,
                         "last_modified": str(stat.st_mtime),
                         "storage_type": f"Railway Volume ({dir_path})"
@@ -227,6 +269,6 @@ class StorageBucketManager:
 
         if filename in self.user_file_map:
             del self.user_file_map[filename]
-            self._save_user_file_map()
+            self._save_json(self.user_file_map, USER_MAP_FILE)
 
         return deleted

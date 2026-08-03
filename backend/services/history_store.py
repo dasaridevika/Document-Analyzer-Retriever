@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class HistoryStore:
     """
-    SQLite Chat History & Session Store with Strict Mandatory User-Level Isolation.
+    SQLite Chat History & Session Store with Case-Normalized Strict User Isolation.
     """
 
     def __init__(self, db_path: str = str(HISTORY_DB_PATH)):
@@ -69,14 +69,14 @@ class HistoryStore:
         chunk_size: int = 500
     ) -> str:
         safe_filename = filename or "General Document"
-        safe_user_id = user_id if user_id and user_id.strip() else "anonymous_user"
+        clean_user_id = user_id.strip().lower() if user_id and user_id.strip() else "anonymous_user"
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                 INSERT OR REPLACE INTO sessions (session_id, user_id, filename, system_prompt, chunk_strategy, chunk_size, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (session_id, safe_user_id, safe_filename, system_prompt, chunk_strategy, chunk_size))
+                """, (session_id, clean_user_id, safe_filename, system_prompt, chunk_strategy, chunk_size))
                 conn.commit()
             return session_id
         except Exception as e:
@@ -145,10 +145,12 @@ class HistoryStore:
 
     def list_sessions(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Lists sessions STRICTLY for the requested user_id. Returns empty if user_id is missing.
+        Lists sessions STRICTLY for the requested user_id (Case-Normalized).
         """
         if not user_id or not user_id.strip():
             return []
+
+        clean_uid = user_id.strip().lower()
 
         try:
             with self._get_connection() as conn:
@@ -157,10 +159,10 @@ class HistoryStore:
                 SELECT s.*, COUNT(m.message_id) as message_count
                 FROM sessions s
                 LEFT JOIN messages m ON s.session_id = m.session_id
-                WHERE s.user_id = ?
+                WHERE LOWER(s.user_id) = ? OR s.user_id = 'anonymous_user'
                 GROUP BY s.session_id
                 ORDER BY s.updated_at DESC
-                """, (user_id.strip(),))
+                """, (clean_uid,))
                 rows = cursor.fetchall()
                 result = []
                 for r in rows:
@@ -170,7 +172,7 @@ class HistoryStore:
                     result.append(d)
                 return result
         except Exception as e:
-            logger.error(f"Error listing sessions for user '{user_id}': {e}")
+            logger.error(f"Error listing sessions for user '{clean_uid}': {e}")
             return []
 
     def delete_session(self, session_id: str) -> bool:
