@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Formatted for Rich, Rendered Markdown Outputs
+ * Optimized for High-Precision, Detail-Specific & Rendered Markdown Responses
  */
 
 export default {
@@ -54,11 +54,11 @@ export default {
         );
       }
 
-      // 2. RICH RENDERED MARKDOWN LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
-      if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/") {
+      // 2. MASTER DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/" || url.pathname === "") {
         if (request.method !== "POST") {
-          return new Response(JSON.stringify({ error: "Method not allowed" }), {
-            status: 405,
+          return new Response(JSON.stringify({ message: "Cloudflare Workers AI LLM API is Online", model: "@cf/meta/llama-3.1-8b-instruct" }), {
+            status: 200,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
@@ -66,15 +66,14 @@ export default {
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        const richMarkdownSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
-Your goal is to provide exact, highly detailed, and beautifully structured answers in Markdown formatting like ChatGPT.
+        const masterSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
+Your goal is to provide exact, highly detailed, precise, and specific answers formatted in beautiful GitHub Markdown like ChatGPT.
 
-FORMATTING GUIDELINES:
-1. Use ### for major section titles (e.g. ### Executive Summary, ### Detailed Breakdown).
-2. Use bold text for key terms, subjects, numbers, and definitions (**Term**).
-3. Use bullet points and numbered lists to structure explanations clearly.
-4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-5. Base your response strictly on the provided document context.`;
+STRICT INSTRUCTIONS FOR ACCURACY & FORMATTING:
+1. **Executive Summary**: Start with a clear section heading '### 🎯 Executive Summary' and a direct callout answer.
+2. **Structured Breakdown / List Out**: Use '###' section headings, bold terms ('**Term**'), bullet points ('- Item'), and numbered lists to detail EVERY topic, step, formula, or finding.
+3. **Page Citations**: Cite exact page numbers naturally in the text (e.g. [Page 4], [Page 12]).
+4. **Factual Accuracy**: Base your answer strictly on the provided DOCUMENT CONTEXT. Never make up unverified information.`;
 
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
@@ -82,11 +81,11 @@ FORMATTING GUIDELINES:
         const messages = [
           {
             role: "system",
-            content: `${richMarkdownSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
+            content: `${masterSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a comprehensive, beautifully structured Markdown response for:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a comprehensive, beautifully formatted Markdown response for:\n\n"${userQuestion}"`,
           },
         ];
 
@@ -119,7 +118,7 @@ FORMATTING GUIDELINES:
       }
 
       return new Response(
-        JSON.stringify({ error: "Endpoint not found. Use /analyze or /embeddings" }),
+        JSON.stringify({ error: "Endpoint not found. Use /analyze, /chat, or /embeddings" }),
         { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     } catch (err) {
