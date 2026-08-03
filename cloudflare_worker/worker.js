@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Optimized for Direct, High-Precision, Detail-Specific Answers Without Fluff
+ * High-Precision, Factual, Detail-Specific Answers
  */
 
 export default {
@@ -56,25 +56,38 @@ export default {
 
       // 2. ULTRA-DIRECT ACCURATE DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/" || url.pathname === "") {
-        if (request.method !== "POST") {
-          return new Response(JSON.stringify({ message: "Cloudflare Workers AI LLM API is Online", model: "@cf/meta/llama-3.1-8b-instruct" }), {
+        if (request.method === "GET") {
+          return new Response(JSON.stringify({
+            status: "online",
+            service: "Cloudflare Workers AI Endpoint",
+            llm_model: "@cf/meta/llama-3.1-8b-instruct",
+            embedding_model: "@cf/baai/bge-large-en-v1.5"
+          }), {
             status: 200,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
 
+        if (request.method !== "POST") {
+          return new Response(JSON.stringify({ error: "Method not allowed" }), {
+            status: 405,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
         const body = await request.json();
-        const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
+        const { text = "", title = "", query = "", system_prompt = "", prompt = "", temperature = 0.1 } = body;
 
         const directPrecisionPrompt = system_prompt || `You are a Master AI Document Analyst.
-Provide ONLY the direct, accurate, top-matched result with detail-specific information.
+Provide ONLY the direct, accurate, top-matched result with detail-specific information based strictly on the DOCUMENT CONTEXT.
 
 STRICT RULES:
-1. Answer the user's query DIRECTLY. Do NOT include filler intros, conversational pleasantries, or artificial section headers.
+1. Answer the user's query DIRECTLY. Do NOT include filler intros, conversational pleasantries, or artificial section headers (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
 2. Detail every relevant concept, step, definition, number, or specification present in the DOCUMENT CONTEXT.
 3. Use clear bullet points or bold text where helpful for readability.
 4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-5. Base your response strictly on the provided DOCUMENT CONTEXT. Never make up unverified information.`;
+5. Filter out raw OCR image labels like "Visual [Page 2] Visual".
+6. Base your response strictly on the provided DOCUMENT CONTEXT without making up unverified information.`;
 
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
@@ -94,13 +107,13 @@ STRICT RULES:
         try {
           llmResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
             messages: messages,
-            temperature: 0.1,
+            temperature: temperature,
             max_tokens: 2500,
           });
         } catch (mErr) {
           llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
             messages: messages,
-            temperature: 0.1,
+            temperature: temperature,
             max_tokens: 2500,
           });
         }
