@@ -4,7 +4,6 @@ import os
 import json
 import uuid
 import datetime
-from pathlib import Path
 
 # Page Config
 st.set_page_config(
@@ -41,33 +40,6 @@ def get_backend_url() -> str:
 
 BACKEND_URL = get_backend_url()
 
-# Persistent Disk Session Path (Ensures user stays logged in across page refreshes)
-DISK_SESSION_FILE = Path("/data/active_user_session.json") if Path("/data").exists() else Path(__file__).parent / "active_user_session.json"
-
-def save_disk_session(email: str, name: str):
-    try:
-        data = {"user_email": email, "user_name": name, "timestamp": str(datetime.datetime.now())}
-        with open(DISK_SESSION_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception:
-        pass
-
-def load_disk_session() -> dict:
-    if DISK_SESSION_FILE.exists():
-        try:
-            with open(DISK_SESSION_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-def clear_disk_session():
-    if DISK_SESSION_FILE.exists():
-        try:
-            DISK_SESSION_FILE.unlink()
-        except Exception:
-            pass
-
 # Load Custom CSS
 def load_css():
     css_path = os.path.join(os.path.dirname(__file__), "style.css")
@@ -101,24 +73,14 @@ if "top_k" not in st.session_state:
 if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
 
-# PERMANENT AUTO-LOGIN (Checks Query Params & Disk Cache on Refresh)
+# PERMANENT BROWSER AUTO-LOGIN (Reads Query Params in Browser URL)
+query_params = st.query_params
 if not st.session_state.authenticated:
-    query_params = st.query_params
     param_user = query_params.get("user") or query_params.get("email")
-
     if param_user and "@" in param_user:
         st.session_state.authenticated = True
         st.session_state.user_email = param_user
         st.session_state.user_name = param_user.split("@")[0].capitalize()
-        save_disk_session(param_user, st.session_state.user_name)
-    else:
-        disk_cache = load_disk_session()
-        cached_email = disk_cache.get("user_email")
-        if cached_email and "@" in cached_email:
-            st.session_state.authenticated = True
-            st.session_state.user_email = cached_email
-            st.session_state.user_name = disk_cache.get("user_name", cached_email.split("@")[0].capitalize())
-            st.query_params["user"] = cached_email
 
 # AUTO-RESTORE USER RECENT DATA & CHAT HISTORY ON REFRESH
 if st.session_state.authenticated and not st.session_state.data_loaded:
@@ -174,11 +136,7 @@ if not st.session_state.authenticated:
                         st.session_state.user_email = u_info["email"]
                         st.session_state.user_name = u_info["name"]
                         st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-
-                        # Save permanently to URL & Disk Cache
                         st.query_params["user"] = u_info["email"]
-                        save_disk_session(u_info["email"], u_info["name"])
-
                         st.success(f"Welcome back, {u_info['name']}!")
                         st.rerun()
                     else:
@@ -219,7 +177,6 @@ with st.sidebar:
         st.session_state.current_filename = None
         st.session_state.data_loaded = False
         st.query_params.clear()
-        clear_disk_session()
         st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)

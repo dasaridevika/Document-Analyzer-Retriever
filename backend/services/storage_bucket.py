@@ -58,7 +58,7 @@ USER_MAP_FILE = DATA_DIR / "user_files_map.json"
 
 class StorageBucketManager:
     """
-    Railway S3 Storage Bucket Manager with User-Level File Ownership Filtering.
+    Railway S3 Storage Bucket Manager with Strict Mandatory User Isolation.
     """
 
     def __init__(self):
@@ -108,11 +108,9 @@ class StorageBucketManager:
         except Exception as e:
             logger.warning(f"Failed to save user file map: {e}")
 
-    def save_file(self, filename: str, content: bytes, user_id: str = "default_user", content_type: str = "application/pdf") -> Dict[str, Any]:
-        """
-        Saves PDF file and records user_id ownership.
-        """
+    def save_file(self, filename: str, content: bytes, user_id: str = "anonymous_user", content_type: str = "application/pdf") -> Dict[str, Any]:
         s3_uploaded = False
+        safe_user_id = user_id if user_id and user_id.strip() else "anonymous_user"
 
         if self.s3_client and self.bucket_name:
             try:
@@ -121,9 +119,9 @@ class StorageBucketManager:
                     Key=filename,
                     Body=content,
                     ContentType=content_type,
-                    Metadata={"user_id": user_id}
+                    Metadata={"user_id": safe_user_id}
                 )
-                logger.info(f"Successfully saved '{filename}' for user '{user_id}' directly to S3 Storage Bucket '{self.bucket_name}'.")
+                logger.info(f"Successfully saved '{filename}' for user '{safe_user_id}' directly to S3 Storage Bucket '{self.bucket_name}'.")
                 s3_uploaded = True
             except Exception as e:
                 logger.error(f"S3 Upload error for '{filename}': {e}. Preserving copy on Railway Volume.")
@@ -138,14 +136,14 @@ class StorageBucketManager:
             f.write(content)
 
         # Record user ownership
-        self.user_file_map[filename] = user_id
+        self.user_file_map[filename] = safe_user_id
         self._save_user_file_map()
 
         return {
             "storage_type": f"S3 Storage Bucket ({self.bucket_name})" if s3_uploaded else "Railway Volume Disk",
             "bucket_name": self.bucket_name,
             "filename": filename,
-            "user_id": user_id,
+            "user_id": safe_user_id,
             "size_bytes": len(content),
             "s3_uploaded": s3_uploaded,
             "saved_path": str(p_path)
@@ -169,18 +167,22 @@ class StorageBucketManager:
 
     def list_files(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Lists files filtered strictly by user_id if provided.
+        Lists files STRICTLY for the requested user_id. Returns empty if user_id is missing.
         """
+        if not user_id or not user_id.strip():
+            return []
+
+        clean_uid = user_id.strip()
         files = []
+
         if self.s3_client and self.bucket_name:
             try:
                 resp = self.s3_client.list_objects_v2(Bucket=self.bucket_name)
                 for obj in resp.get("Contents", []):
                     fn = obj["Key"]
-                    owner = self.user_file_map.get(fn, "default_user")
+                    owner = self.user_file_map.get(fn, "")
 
-                    # Filter by user_id
-                    if not user_id or owner == user_id:
+                    if owner == clean_uid:
                         files.append({
                             "filename": fn,
                             "user_id": owner,
@@ -195,17 +197,16 @@ class StorageBucketManager:
         for dir_path in [PRIMARY_BUCKET_DIR, BACKUP_BUCKET_DIR]:
             for f in dir_path.glob("*.pdf"):
                 fn = f.name
-                owner = self.user_file_map.get(fn, "default_user")
-                if not any(x["filename"] == fn for x in files):
-                    if not user_id or owner == user_id:
-                        stat = f.stat()
-                        files.append({
-                            "filename": fn,
-                            "user_id": owner,
-                            "size_bytes": stat.st_size,
-                            "last_modified": str(stat.st_mtime),
-                            "storage_type": f"Railway Volume ({dir_path})"
-                        })
+                owner = self.user_file_map.get(fn, "")
+                if owner == clean_uid and not any(x["filename"] == fn for x in files):
+                    stat = f.stat()
+                    files.append({
+                        "filename": fn,
+                        "user_id": owner,
+                        "size_bytes": stat.st_size,
+                        "last_modified": str(stat.st_mtime),
+                        "storage_type": f"Railway Volume ({dir_path})"
+                    })
 
         return files
 
