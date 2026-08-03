@@ -49,7 +49,7 @@ def load_css():
 
 load_css()
 
-# Session State Initialization
+# Session State & Permanent Auto-Login Initialization
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "user_email" not in st.session_state:
@@ -71,7 +71,16 @@ if "active_nav" not in st.session_state:
 if "top_k" not in st.session_state:
     st.session_state.top_k = 8
 
-# --- FIREBASE AUTHENTICATION SCREEN ---
+# Auto-Remember Login via Query Params (Prevents re-entering email on refresh!)
+query_params = st.query_params
+if not st.session_state.authenticated:
+    remembered_user = query_params.get("user") or query_params.get("email")
+    if remembered_user and "@" in remembered_user:
+        st.session_state.authenticated = True
+        st.session_state.user_email = remembered_user
+        st.session_state.user_name = remembered_user.split("@")[0].capitalize()
+
+# --- FIREBASE GOOGLE-ONLY AUTHENTICATION SCREEN ---
 if not st.session_state.authenticated:
     st.markdown("<br><br>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -79,63 +88,35 @@ if not st.session_state.authenticated:
         st.markdown("""
         <div style="background: white; border: 1px solid #E2E8F0; border-radius: 16px; padding: 32px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05); text-align: center;">
             <h2 style="color: #4F46E5; margin-bottom: 4px; font-weight:700;">📄 DocAnalyzer AI</h2>
-            <p style="color: #64748B; font-size: 0.95rem; margin-bottom: 24px;">Sign in with Firebase to access your private documents & chat history</p>
+            <p style="color: #64748B; font-size: 0.95rem; margin-bottom: 24px;">Sign in with Google to access your private documents & chat history</p>
         </div>
         """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        tab_google, tab_email = st.tabs(["🔥 Google Sign-In", "✉️ Email & Password"])
+        st.markdown("<p style='font-size:0.88rem; color:#475569; text-align:center;'>Enter your Google Email address to sign in:</p>", unsafe_allow_html=True)
+        g_email = st.text_input("Google Email Address", placeholder="user@gmail.com", key="g_email_input", label_visibility="collapsed")
 
-        with tab_google:
-            st.markdown("<p style='font-size:0.88rem; color:#475569;'>Enter your Google Email address to authenticate via Firebase:</p>", unsafe_allow_html=True)
-            g_email = st.text_input("Google Email Address", placeholder="user@gmail.com", key="g_email_input")
-
-            if st.button("🔥 Continue with Google Sign-In", use_container_width=True, type="primary"):
-                if "@" in g_email and "." in g_email:
-                    try:
-                        v_resp = requests.post(f"{BACKEND_URL}/api/auth/verify", json={"token_or_email": g_email}, timeout=5)
-                        if v_resp.status_code == 200:
-                            u_info = v_resp.json()["user"]
-                            st.session_state.authenticated = True
-                            st.session_state.user_email = u_info["email"]
-                            st.session_state.user_name = u_info["name"]
-                            st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-                            st.success(f"Welcome back, {u_info['name']}!")
-                            st.rerun()
-                        else:
-                            st.error("Authentication failed. Please check your email.")
-                    except Exception as e:
-                        st.error(f"Auth error: {e}")
-                else:
-                    st.warning("Please enter a valid Google Email address.")
-
-        with tab_email:
-            e_email = st.text_input("Email Address", placeholder="user@example.com", key="e_email_input")
-            e_pass = st.text_input("Password", type="password", placeholder="••••••••", key="e_pass_input")
-
-            c_login, c_reg = st.columns([1, 1])
-            with c_login:
-                if st.button("Sign In", use_container_width=True):
-                    if "@" in e_email and len(e_pass) >= 4:
+        if st.button("🔥 Continue with Google Sign-In", use_container_width=True, type="primary"):
+            if "@" in g_email and "." in g_email:
+                try:
+                    v_resp = requests.post(f"{BACKEND_URL}/api/auth/verify", json={"token_or_email": g_email}, timeout=5)
+                    if v_resp.status_code == 200:
+                        u_info = v_resp.json()["user"]
                         st.session_state.authenticated = True
-                        st.session_state.user_email = e_email
-                        st.session_state.user_name = e_email.split("@")[0].capitalize()
+                        st.session_state.user_email = u_info["email"]
+                        st.session_state.user_name = u_info["name"]
                         st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-                        st.success("Signed in successfully!")
+
+                        # Save to query params so user stays logged in permanently
+                        st.query_params["user"] = u_info["email"]
+                        st.success(f"Welcome back, {u_info['name']}!")
                         st.rerun()
                     else:
-                        st.warning("Please enter valid credentials.")
-            with c_reg:
-                if st.button("Create Account", use_container_width=True):
-                    if "@" in e_email and len(e_pass) >= 4:
-                        st.session_state.authenticated = True
-                        st.session_state.user_email = e_email
-                        st.session_state.user_name = e_email.split("@")[0].capitalize()
-                        st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-                        st.success("Account created successfully!")
-                        st.rerun()
-                    else:
-                        st.warning("Please enter a valid email and password.")
+                        st.error("Authentication failed. Please check your email.")
+                except Exception as e:
+                    st.error(f"Auth error: {e}")
+            else:
+                st.warning("Please enter a valid Google Email address.")
 
     st.stop()
 
@@ -155,7 +136,7 @@ with st.sidebar:
     # Firebase Authenticated User Profile Badge
     st.markdown(f"""
     <div style="background:#F1F5F9; border-radius:10px; padding:12px; border:1px solid #CBD5E1;">
-        <p style="margin:0; font-size:0.75rem; color:#64748B; font-weight:600;">FIREBASE AUTHENTICATED</p>
+        <p style="margin:0; font-size:0.75rem; color:#64748B; font-weight:600;">FIREBASE GOOGLE USER</p>
         <p style="margin:2px 0 0 0; font-size:0.88rem; color:#0F172A; font-weight:700; word-break:break-all;">🟢 {st.session_state.user_email}</p>
     </div>
     """, unsafe_allow_html=True)
@@ -166,6 +147,7 @@ with st.sidebar:
         st.session_state.user_name = ""
         st.session_state.messages = []
         st.session_state.current_filename = None
+        st.query_params.clear()
         st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
