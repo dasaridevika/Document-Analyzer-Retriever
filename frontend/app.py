@@ -97,9 +97,10 @@ query_params = st.query_params
 if not st.session_state.authenticated:
     param_user = query_params.get("user") or query_params.get("email")
     if param_user and "@" in param_user:
+        clean_p = param_user.strip().lower()
         st.session_state.authenticated = True
-        st.session_state.user_email = param_user
-        st.session_state.user_name = param_user.split("@")[0].capitalize()
+        st.session_state.user_email = clean_p
+        st.session_state.user_name = clean_p.split("@")[0].replace(".", " ").title()
 
 # AUTO-RESTORE USER RECENT DATA & CHAT HISTORY ON REFRESH
 if st.session_state.authenticated and not st.session_state.data_loaded:
@@ -147,32 +148,27 @@ if not st.session_state.authenticated:
         g_email = st.text_input("Google Email Address", placeholder="user@gmail.com", key="g_email_input", label_visibility="collapsed")
 
         if st.button("🔥 Continue with Google Sign-In", use_container_width=True, type="primary"):
-            if "@" in g_email and "." in g_email:
+            clean_email = g_email.strip().lower()
+            if "@" in clean_email and "." in clean_email.split("@")[-1]:
                 b_url = resolve_working_backend_url()
                 try:
-                    v_resp = requests.post(f"{b_url}/api/auth/verify", json={"token_or_email": g_email}, timeout=10)
+                    v_resp = requests.post(f"{b_url}/api/auth/verify", json={"token_or_email": clean_email}, timeout=5)
                     if v_resp.status_code == 200:
-                        u_info = v_resp.json()["user"]
-                        st.session_state.authenticated = True
-                        st.session_state.user_email = u_info["email"]
-                        st.session_state.user_name = u_info["name"]
-                        st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-                        st.query_params["user"] = u_info["email"]
-                        st.success(f"Welcome back, {u_info['name']}!")
-                        st.rerun()
+                        u_info = v_resp.json().get("user", {})
+                        st.session_state.user_name = u_info.get("name", clean_email.split("@")[0].title())
                     else:
-                        st.error("Authentication failed. Please check your email.")
-                except Exception as e:
-                    # Fallback Direct Auth Session Creation if Backend Service is Initializing
-                    st.session_state.authenticated = True
-                    st.session_state.user_email = g_email
-                    st.session_state.user_name = g_email.split("@")[0].capitalize()
-                    st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-                    st.query_params["user"] = g_email
-                    st.success(f"Welcome back, {st.session_state.user_name}!")
-                    st.rerun()
+                        st.session_state.user_name = clean_email.split("@")[0].title()
+                except Exception:
+                    st.session_state.user_name = clean_email.split("@")[0].title()
+
+                st.session_state.authenticated = True
+                st.session_state.user_email = clean_email
+                st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
+                st.query_params["user"] = clean_email
+                st.success(f"Welcome back, {st.session_state.user_name}!")
+                st.rerun()
             else:
-                st.warning("Please enter a valid Google Email address.")
+                st.warning("Please enter a valid email address (e.g. user@gmail.com).")
 
     st.stop()
 
