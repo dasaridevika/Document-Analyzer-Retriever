@@ -13,12 +13,38 @@ from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
 logger = logging.getLogger(__name__)
 
+def _extract_text_from_llm_payload(data: Any) -> str:
+    """
+    Recursively extracts the final text answer from any Cloudflare JSON response structure.
+    """
+    if isinstance(data, str):
+        s = data.strip()
+        if len(s) > 10:
+            return s
+        return ""
+    if isinstance(data, dict):
+        # Check direct string fields
+        for k in ["response", "answer", "output", "text"]:
+            val = data.get(k)
+            if isinstance(val, str) and len(val.strip()) > 10:
+                return val.strip()
+            elif isinstance(val, dict):
+                sub = _extract_text_from_llm_payload(val)
+                if sub:
+                    return sub
+
+        # Check 'result' field
+        res = data.get("result")
+        if res:
+            return _extract_text_from_llm_payload(res)
+
+    return ""
+
 class RAGEngine:
     """
     Production-Grade FAISS RAGEngine:
-    - Smart Broad/Specific Query Intent Classification
-    - Full-Document Coverage + High-Precision FAISS Vector Retrieval
-    - Production-Grade Cloudflare Workers AI (@cf/meta/llama-3.1-8b-instruct) LLM Synthesis
+    Synthesizes exact, intelligent LLM answers from Top-K retrieved chunks using Cloudflare Workers AI
+    (@cf/meta/llama-3.1-8b-instruct). Never returns raw unparsed chunk blocks.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -35,6 +61,7 @@ class RAGEngine:
         cleaned = re.sub(r'Visual\s*\[Page\s*\d+\]\s*Visual', '', text, flags=re.IGNORECASE)
         cleaned = re.sub(r'^\s*Visual\s*$', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
         cleaned = re.sub(r'^\s*Page\s*\d+\s*\[Page\s*\d+\]\s*', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
+        cleaned = re.sub(r'###\s*Key\s*Content\s*Excerpt.*?\n', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()
 
@@ -45,7 +72,7 @@ class RAGEngine:
             "explain the pdf", "what is in", "tell me about", "full document", "complete details",
             "main topics", "key points", "what is this", "describe", "table of contents", "index"
         ]
-        return any(k in lower_q for k in broad_keywords) or len(query.split()) <= 3 and lower_q in ["explain", "describe", "details"]
+        return any(k in lower_q for k in broad_keywords) or (len(query.split()) <= 3 and lower_q in ["explain", "describe", "details"])
 
     def answer_query(
         self,
@@ -58,12 +85,12 @@ class RAGEngine:
         effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         clean_query = query.strip()
 
-        # Handle Conversational Greetings
+        # Conversational Greetings
         lower_q = clean_query.lower().strip("?!.,")
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! Ask me any question about {doc_name}, and I will provide a direct, production-grade answer with page citations.",
+                "answer": f"Hello! Ask me any question about {doc_name}, and I will analyze the top matched sections to give you an exact answer with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -71,7 +98,7 @@ class RAGEngine:
 
         is_broad = self._is_broad_query(clean_query)
 
-        # 1. Retrieve Top Semantic Similarity Chunks
+        # 1. Retrieve Top-K Semantic Similarity Chunks for the Query
         similarity_chunks = []
         query_embeddings = self.embedding_service.generate_embeddings([clean_query])
         if query_embeddings:
@@ -82,19 +109,16 @@ class RAGEngine:
                 filename_filter=filename
             )
 
-        # 2. Retrieve Full-Document Distributed Coverage Chunks (spanning beginning, middle, and end)
-        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=10)
+        # 2. Retrieve Distributed Coverage Chunks
+        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
 
-        # Merge Chunks with Strict Prioritization
         merged_chunks = []
         seen_ids = set()
 
         if is_broad:
-            # Broad/Summary Query: Put Distributed Full-Document Chunks FIRST, followed by similarity chunks
             ordered_pool = distributed_chunks + similarity_chunks
             max_chunks_to_llm = 8
         else:
-            # Specific Query: Put Top Vector Similarity Matches FIRST
             ordered_pool = similarity_chunks + distributed_chunks
             max_chunks_to_llm = 5
 
@@ -106,7 +130,7 @@ class RAGEngine:
 
         if not merged_chunks and filename:
             logger.info("Fallback: retrieving distributed chunks across all indexed documents...")
-            merged_chunks = self.vector_store.get_distributed_chunks(filename=None, count=10)
+            merged_chunks = self.vector_store.get_distributed_chunks(filename=None, count=8)
 
         if not merged_chunks:
             return {
@@ -118,15 +142,15 @@ class RAGEngine:
 
         target_chunks = merged_chunks[:max_chunks_to_llm]
 
-        # 3. Format Production Context Excerpts
+        # 3. Format Top-K Context Excerpts for LLM Answer Extraction
         context_blocks = []
         for i, chunk in enumerate(target_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"--- [DOCUMENT EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
+            context_blocks.append(f"--- [TOP-K MATCH {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Production-Grade Response via Cloudflare Workers AI
+        # 4. Extract & Synthesize Exact Answer via Cloudflare Workers AI
         raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -179,15 +203,10 @@ class RAGEngine:
                 
                 if resp.status_code == 200:
                     data = resp.json()
-                    ans = (
-                        data.get("response") or
-                        data.get("result", {}).get("response") or
-                        data.get("result") or
-                        ""
-                    )
-                    if isinstance(ans, str) and len(ans.strip()) > 20:
-                        logger.info("Successfully generated LLM response via Cloudflare Worker AI!")
-                        return ans.strip()
+                    extracted_text = _extract_text_from_llm_payload(data)
+                    if extracted_text:
+                        logger.info("Successfully extracted LLM answer from Cloudflare Worker AI!")
+                        return extracted_text
             except Exception as e:
                 logger.warning(f"Failed calling worker endpoint '{target_url}': {e}")
 
@@ -204,35 +223,36 @@ class RAGEngine:
 
         if is_broad:
             system_instruction = f"""You are a Senior Technical Document Lead.
-The user asked for a comprehensive explanation of the document contents: "{query}".
+The user asked for an explanation of the document contents: "{query}".
 
-PRODUCE A PRODUCTION-GRADE DOCUMENT SUMMARY STRUCTURED AS FOLLOWS:
-1. **Document Overview & Purpose**: Explain what the document covers and its main objectives.
-2. **Key Sections & Topics Covered**: Provide a detailed, organized breakdown of major topics, modules, or sections found across the pages.
-3. **Core Technical Details & Specifications**: Highlight important formulas, rules, architectures, or findings with exact figures/data.
-4. **Key Takeaways & Conclusion**: Summarize the primary takeaways.
+Read the provided Top-K Document Context and synthesize a comprehensive answer structured as follows:
+1. **Executive Overview & Purpose**: Explain the core subject of the document.
+2. **Key Sections & Topics Covered**: Provide a detailed, organized breakdown of major topics, modules, or rules.
+3. **Core Details & Specifications**: Highlight important rules, formulas, components, or requirements found in the context.
+4. **Key Takeaways**: Summarize the primary takeaways.
 
-Cite page numbers naturally in brackets like [Page 1], [Page 7].
-Do NOT print raw chunk headers like "Section (Page 1):" or "Visual [Page 2]". Write fluent, professional prose and bullet points."""
+Cite page numbers naturally in brackets like [Page 1], [Page 4].
+Do NOT print raw chunk headers. Write fluent, professional prose and bullet points."""
         else:
-            system_instruction = f"""You are a Master AI Document Assistant.
-CRITICAL MANDATE: Answer ONLY the specific topic asked in the user query: "{query}".
+            system_instruction = f"""You are an Expert AI Document Assistant.
+Your task is to find the exact answer to the user's question: "{query}" from the provided Top-K Document Context.
 
 RULES:
-1. Explain ONLY what is explicitly asked in "{query}".
-2. Do NOT mention or summarize unrelated topics present in the document context.
-3. Provide exact definitions, syntax, code examples, rules, methods, and page citations matching "{query}".
-4. Write in clear, professional paragraphs and bullet points. Cite page numbers like [Page 8]."""
+1. Read the Top-K Document Context carefully and extract the EXACT answer matching "{query}".
+2. Explain the answer thoroughly using clear paragraphs, bold terms, and bullet points.
+3. Do NOT output raw chunk headers or dump unparsed text.
+4. Cite page numbers naturally like [Page 4], [Page 8].
+5. Base your response strictly on the provided Top-K Document Context."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided document context, write a production-grade, highly accurate answer for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the Top-K Document Context provided, extract and write the exact answer for:\n\n\"{query}\""}
         ]
 
         payload = {
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": 2500
+            "max_tokens": 3000
         }
 
         logger.info(f"Calling Cloudflare Workers AI REST API model '{self.llm_model}'...")
@@ -242,12 +262,11 @@ RULES:
             raise RuntimeError(f"Cloudflare REST API HTTP {resp.status_code}: {resp.text}")
 
         data = resp.json()
-        if not data.get("success"):
-            raise RuntimeError(f"Cloudflare AI LLM error: {data.get('errors')}")
+        extracted_text = _extract_text_from_llm_payload(data)
+        if extracted_text:
+            return extracted_text
 
-        result = data.get("result", {})
-        ans = result.get("response", "").strip()
-        return ans
+        raise RuntimeError("Cloudflare REST API response did not contain valid text.")
 
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, is_broad: bool, retrieved_chunks: List[Dict[str, Any]], temperature: float
@@ -270,17 +289,17 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Production Fallback Synthesizer (Generates clean, cohesive prose instead of raw snippet dumps)
-        prose_blocks = []
-        for idx, chunk in enumerate(retrieved_chunks[:6]):
+        # Intelligent Sentence QA Synthesizer (Extracts exact facts from Top-K chunks instead of raw chunk dumping)
+        answer_sentences = []
+        for idx, chunk in enumerate(retrieved_chunks[:4]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            if lines:
-                block_text = " ".join(lines)
-                prose_blocks.append(f"### Key Content Excerpt (Page {page_num})\n{block_text}")
+            lines = [l.strip() for l in text.splitlines() if l.strip() and len(l.strip()) > 15]
 
-        if prose_blocks:
-            return f"## Production Analysis of Document Contents\n\n" + "\n\n".join(prose_blocks)
+            for line in lines[:3]:
+                answer_sentences.append(f"• {line} [Page {page_num}]")
 
-        return f"I analyzed the document context for **\"{query}\"**, but could not generate a complete summary."
+        if answer_sentences:
+            return f"Based on the top matched sections in your document for **\"{query}\"**, here is the extracted answer:\n\n" + "\n".join(answer_sentences)
+
+        return f"I analyzed the document context for **\"{query}\"**, but could not extract a complete answer."
