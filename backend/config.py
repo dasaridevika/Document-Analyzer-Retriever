@@ -9,7 +9,6 @@ load_dotenv()
 
 def get_clean_env(key: str, default: str = "") -> str:
     val = os.getenv(key, default).strip()
-    # Filter out empty or unreplaced default placeholders
     if not val or val.lower() in ["none", "null", "undefined"]:
         return ""
     return val
@@ -27,6 +26,9 @@ else:
     DATA_DIR = Path("/app/storage")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+UPLOAD_DIR = DATA_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 BACKUP_DATA_DIR = Path("/data") if Path("/data").exists() else Path("/app/storage")
 BACKUP_DATA_DIR.mkdir(parents=True, exist_ok=True)
