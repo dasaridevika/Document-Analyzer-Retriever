@@ -5,6 +5,10 @@ import subprocess
 import urllib.request
 import urllib.error
 
+# Enforce explicit internal backend port & URL environment variables
+os.environ["BACKEND_PORT"] = "8001"
+os.environ["BACKEND_URL"] = "http://127.0.0.1:8001"
+
 def wait_for_backend(url: str, timeout: int = 30) -> bool:
     """
     Polls the backend health endpoint until it responds with HTTP 200 OK.
@@ -32,7 +36,7 @@ def start_backend_process(backend_port: str):
 
 def main():
     port = os.getenv("PORT", "8501")
-    backend_port = os.getenv("BACKEND_PORT", "8001")
+    backend_port = "8001"
 
     print(f"=========================================================")
     print(f" Starting Document Analyser & Retriever Single-Service")
@@ -40,7 +44,7 @@ def main():
     print(f" Streamlit Frontend Port: {port}")
     print(f"=========================================================")
 
-    # 1. Launch FastAPI Backend process
+    # 1. Launch FastAPI Backend process on 8001
     backend_process = start_backend_process(backend_port)
 
     # 2. Wait for FastAPI backend readiness

@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# High-Priority Local Container Backend Resolver (Prevents 405 Method Not Allowed from Streamlit public domain)
+# High-Priority Internal Port 8001 Resolver
 def resolve_working_backend_url() -> str:
     if "cached_backend_url" in st.session_state and st.session_state.cached_backend_url:
         try:
@@ -25,18 +25,16 @@ def resolve_working_backend_url() -> str:
 
     backend_port = os.getenv("BACKEND_PORT", "8001")
     env_backend = os.getenv("BACKEND_URL", "").rstrip("/")
-    railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").rstrip("/")
 
-    # Priority 1: Check internal local container endpoints where FastAPI runs
+    # Priority 1: Check internal local container port 8001 where FastAPI runs
     local_candidates = [
-        f"http://127.0.0.1:{backend_port}",
         "http://127.0.0.1:8001",
-        "http://127.0.0.1:8000",
-        f"http://localhost:{backend_port}",
-        "http://localhost:8001",
-        "http://localhost:8000",
-        f"http://0.0.0.0:{backend_port}",
+        f"http://127.0.0.1:{backend_port}",
         "http://0.0.0.0:8001",
+        "http://localhost:8001",
+        f"http://0.0.0.0:{backend_port}",
+        f"http://localhost:{backend_port}",
+        "http://127.0.0.1:8000",
         "http://0.0.0.0:8000"
     ]
 
@@ -54,21 +52,7 @@ def resolve_working_backend_url() -> str:
         except Exception:
             pass
 
-    # Priority 2: Check Railway public domain if reverse proxied to FastAPI
-    if railway_domain:
-        for proto in ["https", "http"]:
-            candidate = f"{proto}://{railway_domain}"
-            try:
-                r = requests.get(f"{candidate}/api/health", timeout=1.5)
-                if r.status_code == 200:
-                    data = r.json()
-                    if isinstance(data, dict) and data.get("service") == "DocAnalyzer API":
-                        st.session_state.cached_backend_url = candidate
-                        return candidate
-            except Exception:
-                pass
-
-    fallback = f"http://127.0.0.1:{backend_port}"
+    fallback = "http://127.0.0.1:8001"
     st.session_state.cached_backend_url = fallback
     return fallback
 
