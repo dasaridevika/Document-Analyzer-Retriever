@@ -85,7 +85,6 @@ class VectorStoreManager:
         norm_embeddings = self._normalize_vectors(embeddings)
 
         if self.faiss_module and self.faiss_index:
-            # Check dimensions match
             if norm_embeddings.shape[1] != self.embedding_dim:
                 self.embedding_dim = norm_embeddings.shape[1]
                 self.faiss_index = self.faiss_module.IndexFlatIP(self.embedding_dim)
@@ -118,54 +117,59 @@ class VectorStoreManager:
         top_k: int = 8,
         filename_filter: str = None
     ) -> List[Dict[str, Any]]:
+        """
+        High-Precision FAISS Cosine Similarity Search with Exact Candidate Filtering.
+        """
         if not self.ids_store:
             return []
 
         norm_query = self._normalize_vectors([query_embedding])
 
+        # Filter candidate indices matching filename_filter first
+        candidate_indices = []
+        for i, meta in enumerate(self.metadata_store):
+            if not filename_filter or meta.get("filename") == filename_filter:
+                candidate_indices.append(i)
+
+        # Fallback if filename_filter candidate set is empty
+        if not candidate_indices:
+            candidate_indices = list(range(len(self.ids_store)))
+
         retrieved_chunks = []
 
         if self.faiss_module and self.faiss_index and self.faiss_index.ntotal > 0:
-            search_k = min(self.faiss_index.ntotal, max(top_k * 4, 30))
+            # Evaluate candidates with FAISS vector similarity
+            search_k = min(self.faiss_index.ntotal, len(self.ids_store))
             scores, indices = self.faiss_index.search(norm_query, search_k)
 
             for score, idx in zip(scores[0], indices[0]):
-                if idx < 0 or idx >= len(self.ids_store):
-                    continue
-                meta = self.metadata_store[idx]
-                if filename_filter and meta.get("filename") != filename_filter:
-                    continue
-
-                sim_score = round(float(max(0.0, min(1.0, score))), 4)
-                retrieved_chunks.append({
-                    "chunk_id": self.ids_store[idx],
-                    "text": self.documents_store[idx],
-                    "metadata": meta,
-                    "similarity_score": sim_score,
-                    "distance": 1.0 - sim_score
-                })
-
-                if len(retrieved_chunks) >= top_k:
-                    break
-        else:
-            # Fallback NumPy Cosine Similarity Search
-            if hasattr(self, "numpy_vectors") and self.numpy_vectors is not None:
-                sims = np.dot(self.numpy_vectors, norm_query.T).flatten()
-                sorted_indices = np.argsort(sims)[::-1]
-                for idx in sorted_indices:
-                    meta = self.metadata_store[idx]
-                    if filename_filter and meta.get("filename") != filename_filter:
-                        continue
-                    sim_score = round(float(max(0.0, min(1.0, sims[idx]))), 4)
+                if idx in candidate_indices:
+                    sim_score = round(float(max(0.0, min(1.0, score))), 4)
                     retrieved_chunks.append({
                         "chunk_id": self.ids_store[idx],
                         "text": self.documents_store[idx],
-                        "metadata": meta,
+                        "metadata": self.metadata_store[idx],
                         "similarity_score": sim_score,
                         "distance": 1.0 - sim_score
                     })
                     if len(retrieved_chunks) >= top_k:
                         break
+        else:
+            # Fallback NumPy Cosine Similarity Search
+            if hasattr(self, "numpy_vectors") and self.numpy_vectors is not None:
+                sims = np.dot(self.numpy_vectors[candidate_indices], norm_query.T).flatten()
+                sorted_rel_indices = np.argsort(sims)[::-1]
+
+                for rel_idx in sorted_rel_indices[:top_k]:
+                    original_idx = candidate_indices[rel_idx]
+                    sim_score = round(float(max(0.0, min(1.0, sims[rel_idx]))), 4)
+                    retrieved_chunks.append({
+                        "chunk_id": self.ids_store[original_idx],
+                        "text": self.documents_store[original_idx],
+                        "metadata": self.metadata_store[original_idx],
+                        "similarity_score": sim_score,
+                        "distance": 1.0 - sim_score
+                    })
 
         return retrieved_chunks
 
@@ -174,13 +178,13 @@ class VectorStoreManager:
         filename: str = None,
         count: int = 12
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieves evenly distributed chunks across the entire document for complete FAISS summarization.
-        """
         matching_indices = [
             i for i, m in enumerate(self.metadata_store)
             if not filename or m.get("filename") == filename
         ]
+
+        if not matching_indices:
+            matching_indices = list(range(len(self.ids_store)))
 
         if not matching_indices:
             return []
@@ -261,7 +265,7 @@ class VectorStoreManager:
         return {
             "total_chunks": count,
             "vector_engine": "FAISS (Facebook AI Similarity Search)",
-            "index_type": "IndexFlatIP (Exact Cosine Similarity)",
+            "index_type": "IndexFlatIP (Exact Candidate Cosine Search)",
             "embedding_dim": self.embedding_dim,
             "storage_directory": str(VECTOR_DB_DIR)
         }
