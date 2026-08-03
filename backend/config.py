@@ -20,21 +20,45 @@ def get_clean_env(key: str, default: str = "") -> str:
         return ""
     return val
 
-# Detect Railway Persistent Volume Storage Mount Path
-env_data_dir = get_clean_env("DATA_DIR") or get_clean_env("RAILWAY_VOLUME_MOUNT_PATH")
-if env_data_dir:
-    DATA_DIR = Path(env_data_dir)
-elif Path("/data").exists():
-    DATA_DIR = Path("/data")
-else:
-    DATA_DIR = Path("/app/storage")
+def get_safe_data_dir() -> Path:
+    """
+    Safely resolves a writable DATA_DIR path without permission crashes.
+    """
+    env_dir = get_clean_env("DATA_DIR") or get_clean_env("RAILWAY_VOLUME_MOUNT_PATH")
+    if env_dir:
+        try:
+            p = Path(env_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except Exception:
+            pass
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if Path("/data").exists():
+        try:
+            p = Path("/data")
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except Exception:
+            pass
+
+    # Guaranteed Writable Fallback inside App Repository
+    fallback = BASE_DIR / "storage"
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+    except Exception:
+        # Ultimate temporary fallback
+        import tempfile
+        tmp = Path(tempfile.gettempdir()) / "doc_analyser_storage"
+        tmp.mkdir(parents=True, exist_ok=True)
+        return tmp
+
+DATA_DIR = get_safe_data_dir()
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-BACKUP_DATA_DIR = Path("/data") if Path("/data").exists() else Path("/app/storage")
+BACKUP_DATA_DIR = DATA_DIR / "backup"
 BACKUP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 VECTOR_DB_DIR = DATA_DIR / "vector_db"
@@ -56,7 +80,7 @@ CLOUDFLARE_LLM_MODEL = os.getenv(
 
 # API Host & Port
 BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
-BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8000))
+BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8001))
 
 # Default System Prompt presets
 DEFAULT_SYSTEM_PROMPT = """You are a precise, highly analytical Document AI assistant.
