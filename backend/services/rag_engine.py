@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 class RAGEngine:
     """
     FAISS-Powered High-Precision RAGEngine:
-    Always calls Cloudflare Workers AI (@cf/meta/llama-3.1-8b-instruct) via the live worker endpoint
-    to deliver intelligent, fluent, ChatGPT-quality responses.
+    Enforces Strict Query-Topic Isolation so the LLM answers ONLY the exact question asked
+    without including unrelated document sections.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -31,7 +31,6 @@ class RAGEngine:
     def _clean_response_artifacts(self, text: str) -> str:
         if not text:
             return ""
-        # Remove raw image/OCR artifact labels
         cleaned = re.sub(r'Visual\s*\[Page\s*\d+\]\s*Visual', '', text, flags=re.IGNORECASE)
         cleaned = re.sub(r'^\s*Visual\s*$', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
         cleaned = re.sub(r'^\s*Page\s*\d+\s*\[Page\s*\d+\]\s*', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
@@ -76,28 +75,31 @@ class RAGEngine:
             )
 
         # 2. Retrieve Distributed Coverage Chunks for broad context
-        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
+        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=6)
 
-        # Priority Order: Similarity Chunks FIRST for specific questions
-        merged_chunks = []
-        seen_ids = set()
-
+        # Strict Query Focus Selection:
+        # For specific queries, use ONLY top similarity chunks (max 4-5) to prevent noisy/unrelated topics
         if is_summary_query:
-            ordered = distributed_chunks + similarity_chunks
+            merged_chunks = distributed_chunks + similarity_chunks
+            max_chunks_to_llm = 8
         else:
-            ordered = similarity_chunks + distributed_chunks
+            # Give 100% priority to top semantic similarity chunks
+            merged_chunks = similarity_chunks if similarity_chunks else distributed_chunks
+            max_chunks_to_llm = 4
 
-        for c in ordered:
+        seen_ids = set()
+        filtered_chunks = []
+        for c in merged_chunks:
             cid = c["chunk_id"]
             if cid not in seen_ids:
                 seen_ids.add(cid)
-                merged_chunks.append(c)
+                filtered_chunks.append(c)
 
-        if not merged_chunks and filename:
+        if not filtered_chunks and filename:
             logger.info("Fallback: retrieving distributed chunks across all indexed documents...")
-            merged_chunks = self.vector_store.get_distributed_chunks(filename=None, count=10)
+            filtered_chunks = self.vector_store.get_distributed_chunks(filename=None, count=6)
 
-        if not merged_chunks:
+        if not filtered_chunks:
             return {
                 "answer": "I searched the document context, but I could not find relevant information matching your question.",
                 "sources": [],
@@ -105,20 +107,22 @@ class RAGEngine:
                 "retrieved_count": 0
             }
 
+        target_chunks = filtered_chunks[:max_chunks_to_llm]
+
         # 3. Format Context Excerpts cleanly
         context_blocks = []
-        for i, chunk in enumerate(merged_chunks[:8]):
+        for i, chunk in enumerate(target_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
             context_blocks.append(f"--- [DOCUMENT EXCERPT {i+1} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Intelligent LLM Response via Cloudflare Workers AI
+        # 4. Generate High-Precision LLM Response
         raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
             query=clean_query,
-            retrieved_chunks=merged_chunks[:8],
+            retrieved_chunks=target_chunks,
             temperature=temperature
         )
 
@@ -132,7 +136,7 @@ class RAGEngine:
                 "filename": c["metadata"].get("filename"),
                 "similarity_score": c.get("similarity_score")
             }
-            for idx, c in enumerate(merged_chunks[:8])
+            for idx, c in enumerate(target_chunks)
         ]
 
         return {
@@ -145,7 +149,6 @@ class RAGEngine:
     def _generate_cloudflare_worker_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
-        # Try both endpoint URLs for maximum reliability
         endpoints = [
             f"{self.worker_base_url}/analyze",
             self.worker_base_url
@@ -188,18 +191,19 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        system_instruction = f"""You are an expert AI Document Assistant.
-Write a clear, intelligent, and comprehensive response explaining the answer to the user's question based on the Document Context.
+        system_instruction = f"""You are a Master AI Document Assistant.
+CRITICAL MANDATE:
+You MUST answer ONLY the specific topic asked in the user query: "{query}".
 
-RULES:
-1. Directly answer the user's question: "{query}".
-2. Explain the topic thoroughly using clear paragraphs, bold key terms, and bullet points.
-3. Do NOT print raw chunk labels like "Key Topic (Page X)" or "Page 1 [Page 1]".
-4. Cite page numbers naturally (e.g. [Page 8], [Page 11])."""
+STRICT QUERY ISOLATION RULES:
+1. Explain ONLY what is explicitly asked in the query: "{query}".
+2. Do NOT mention, summarize, or include unrelated topics present in the document context.
+3. Include exact definitions, syntax, code examples, rules, methods, and page numbers matching "{query}".
+4. Write in clear, professional paragraphs and bullet points. Cite page numbers naturally like [Page 8]."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided document context, explain:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided document context, give a direct, detail-specific answer for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -245,7 +249,7 @@ RULES:
 
         # Clean Cohesive Fallback Synthesizer
         prose_blocks = []
-        for idx, chunk in enumerate(retrieved_chunks[:5]):
+        for idx, chunk in enumerate(retrieved_chunks[:4]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
             lines = [l.strip() for l in text.splitlines() if l.strip()]

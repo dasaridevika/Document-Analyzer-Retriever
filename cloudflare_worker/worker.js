@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Query-Specific Precision Answers (No Duplicate Repeated Summaries)
+ * Strict Query-Topic Isolation & High-Precision Answers
  */
 
 export default {
@@ -80,16 +80,16 @@ export default {
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
 
-        const querySpecificPrompt = system_prompt || `You are a Master AI Document Analyst.
-Your task is to answer the SPECIFIC USER QUERY directly, accurately, and thoroughly using the provided Document Context.
+        const querySpecificPrompt = `You are a Master AI Document Assistant.
+CRITICAL MANDATE:
+Answer ONLY the specific topic asked in the user query: "${userQuestion}".
 
-STRICT INSTRUCTIONS:
-1. Focus SPECIFICALLY and ONLY on answering the user's exact query: "${userQuestion}".
-2. Do NOT repeat previous general summaries or unrelated document intros. Answer ONLY what is asked in "${userQuestion}".
-3. Detail every relevant rule, concept, step, definition, formula, number, or specification matching "${userQuestion}".
-4. Filter out raw PDF OCR image labels like "Visual [Page 2] Visual".
-5. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-6. Base your response strictly on the provided DOCUMENT CONTEXT.`;
+STRICT QUERY ISOLATION RULES:
+1. Explain ONLY what is explicitly asked in "${userQuestion}".
+2. Do NOT mention, summarize, or list unrelated topics present in the document context (such as variables, dictionaries, lists, or functions) unless explicitly asked in "${userQuestion}".
+3. Provide exact definitions, syntax, code examples, rules, methods, and page citations matching "${userQuestion}".
+4. Write in clear, professional paragraphs and structured bullet points. Cite page numbers like [Page 8].
+5. Base your response strictly on the provided DOCUMENT CONTEXT.`;
 
         const messages = [
           {
@@ -98,7 +98,7 @@ STRICT INSTRUCTIONS:
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a direct, detail-specific answer answering the exact query:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a direct, detail-specific answer answering ONLY the exact query:\n\n"${userQuestion}"`,
           },
         ];
 
