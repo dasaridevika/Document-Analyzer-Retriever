@@ -13,35 +13,37 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Robust Endpoint Resolver (Verifies exact FastAPI 'DocAnalyzer API' service)
+# High-Priority Local Container Backend Resolver (Prevents 405 Method Not Allowed from Streamlit public domain)
 def resolve_working_backend_url() -> str:
     if "cached_backend_url" in st.session_state and st.session_state.cached_backend_url:
         try:
             r = requests.get(f"{st.session_state.cached_backend_url}/api/health", timeout=1)
-            if r.status_code == 200 and r.json().get("service") == "DocAnalyzer API":
+            if r.status_code == 200 and isinstance(r.json(), dict) and r.json().get("service") == "DocAnalyzer API":
                 return st.session_state.cached_backend_url
         except Exception:
             pass
 
+    backend_port = os.getenv("BACKEND_PORT", "8001")
     env_backend = os.getenv("BACKEND_URL", "").rstrip("/")
     railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").rstrip("/")
-    port = os.getenv("BACKEND_PORT", os.getenv("PORT", "8000"))
 
-    candidates = []
-    if env_backend:
-        candidates.append(env_backend)
-    if railway_domain:
-        candidates.append(f"https://{railway_domain}")
-        candidates.append(f"http://{railway_domain}")
+    # Priority 1: Check internal local container endpoints where FastAPI runs
+    local_candidates = [
+        f"http://127.0.0.1:{backend_port}",
+        "http://127.0.0.1:8001",
+        "http://127.0.0.1:8000",
+        f"http://localhost:{backend_port}",
+        "http://localhost:8001",
+        "http://localhost:8000",
+        f"http://0.0.0.0:{backend_port}",
+        "http://0.0.0.0:8001",
+        "http://0.0.0.0:8000"
+    ]
 
-    # Local & Internal Container Host Candidates
-    for host in ["127.0.0.1", "0.0.0.0", "localhost"]:
-        for p in [port, "8000", "8001", "5000"]:
-            url = f"http://{host}:{p}"
-            if url not in candidates:
-                candidates.append(url)
+    if env_backend and env_backend not in local_candidates:
+        local_candidates.insert(0, env_backend)
 
-    for candidate in candidates:
+    for candidate in local_candidates:
         try:
             r = requests.get(f"{candidate}/api/health", timeout=1.5)
             if r.status_code == 200:
@@ -52,17 +54,21 @@ def resolve_working_backend_url() -> str:
         except Exception:
             pass
 
-    # Secondary Probing if health check is starting
-    for candidate in candidates:
-        try:
-            r = requests.get(candidate, timeout=1)
-            if r.status_code == 200:
-                st.session_state.cached_backend_url = candidate
-                return candidate
-        except Exception:
-            pass
+    # Priority 2: Check Railway public domain if reverse proxied to FastAPI
+    if railway_domain:
+        for proto in ["https", "http"]:
+            candidate = f"{proto}://{railway_domain}"
+            try:
+                r = requests.get(f"{candidate}/api/health", timeout=1.5)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, dict) and data.get("service") == "DocAnalyzer API":
+                        st.session_state.cached_backend_url = candidate
+                        return candidate
+            except Exception:
+                pass
 
-    fallback = candidates[0] if candidates else f"http://127.0.0.1:{port}"
+    fallback = f"http://127.0.0.1:{backend_port}"
     st.session_state.cached_backend_url = fallback
     return fallback
 
