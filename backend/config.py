@@ -16,7 +16,11 @@ load_dotenv()
 
 def get_clean_env(key: str, default: str = "") -> str:
     val = os.getenv(key, default).strip()
-    if not val or val.lower() in ["none", "null", "undefined"]:
+    placeholder_terms = [
+        "none", "null", "undefined", "your_cloudflare_account_id_here",
+        "your_cloudflare_api_token_here", "your_account_id", "your_api_token"
+    ]
+    if not val or val.lower() in placeholder_terms:
         return ""
     return val
 
@@ -47,7 +51,6 @@ def get_safe_data_dir() -> Path:
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
     except Exception:
-        # Ultimate temporary fallback
         import tempfile
         tmp = Path(tempfile.gettempdir()) / "doc_analyser_storage"
         tmp.mkdir(parents=True, exist_ok=True)

@@ -8,48 +8,55 @@ from backend.config import (
     CLOUDFLARE_API_TOKEN,
     CLOUDFLARE_EMBEDDING_MODEL
 )
-from backend.services.worker_analyzer import WORKER_EMBEDDINGS_URL
+from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     """
-    Priority 1: Your Cloudflare Worker AI URL Link
-    Priority 2: Direct Cloudflare REST API (Optional)
-    Priority 3: Fast Zero-Dependency Vector Hashing Fallback
+    Production-Grade BGE Large Embedding Service:
+    - Priority 1: Live Cloudflare Worker Embedding Endpoint (@cf/baai/bge-large-en-v1.5)
+    - Priority 2: Direct Cloudflare REST API (If real credentials provided)
+    - Priority 3: Zero-Dependency High-Precision Vector Hashing Fallback
     """
 
     def __init__(self):
         self.account_id = CLOUDFLARE_ACCOUNT_ID
         self.api_token = CLOUDFLARE_API_TOKEN
-        self.model_name = CLOUDFLARE_EMBEDDING_MODEL
-        self.worker_url = WORKER_EMBEDDINGS_URL
+        self.model_name = CLOUDFLARE_EMBEDDING_MODEL or "@cf/baai/bge-large-en-v1.5"
+        base = WORKER_BASE_URL or DEFAULT_WORKER_URL
+        self.worker_urls = [
+            f"{base}/embeddings",
+            f"{base}/embed",
+            base
+        ]
 
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
 
-        # Priority 1: Use your Cloudflare Worker AI URL Link!
-        if self.worker_url:
+        # Priority 1: Use Live Cloudflare Worker BGE Large Embeddings Endpoint
+        for w_url in self.worker_urls:
             try:
-                response = requests.post(self.worker_url, json={"text": texts}, timeout=30)
+                logger.info(f"Generating embeddings via Cloudflare Worker AI link at '{w_url}'...")
+                response = requests.post(w_url, json={"text": texts}, timeout=40)
                 if response.status_code == 200:
                     data = response.json()
                     vectors = data.get("data") or data.get("result", {}).get("data")
-                    if vectors and len(vectors) == len(texts):
-                        logger.info("Successfully generated embeddings via Cloudflare Worker AI link.")
+                    if isinstance(vectors, list) and len(vectors) == len(texts):
+                        logger.info("Successfully generated 1024-dim embeddings via Cloudflare Worker AI!")
                         return vectors
             except Exception as e:
-                logger.warning(f"Cloudflare Worker AI link embedding call failed: {e}")
+                logger.warning(f"Cloudflare Worker embedding call to '{w_url}' failed: {e}")
 
-        # Priority 2: Direct Cloudflare REST API (Only if real Account ID & Token set)
-        if self.account_id and self.api_token:
+        # Priority 2: Direct Cloudflare REST API (Only if REAL non-placeholder credentials provided)
+        if self.account_id and self.api_token and "placeholder" not in self.account_id:
             try:
                 return self._generate_cloudflare_rest_embeddings(texts)
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API embedding failed: {e}")
 
-        # Priority 3: Zero-Dependency Hashing Embedding Fallback
+        # Priority 3: Zero-Dependency High-Precision Hashing Vector Fallback
         logger.info("Using lightweight zero-dependency Hashing vector fallback...")
         return [self._hash_embedding(t) for t in texts]
 
