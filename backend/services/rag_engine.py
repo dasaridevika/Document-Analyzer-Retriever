@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    FAISS-Powered Direct Detail-Specific RAG Engine:
-    Delivers exact, highly detailed, direct document-backed explanations with natural page citations.
+    FAISS-Powered Direct High-Precision RAG Engine:
+    Delivers exact, detail-specific, document-grounded explanations with zero filler or template fluff.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -42,7 +42,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the document to provide a direct, highly detailed answer with page citations.",
+                "answer": f"Hello! Ask me any question about {doc_name}, and I will provide a direct, detail-specific answer with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -88,7 +88,7 @@ class RAGEngine:
 
         if not retrieved_chunks:
             return {
-                "answer": "I searched the document, but I could not find relevant information matching your question.",
+                "answer": "I searched the document context, but I could not find relevant information matching your question.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -102,7 +102,7 @@ class RAGEngine:
             context_blocks.append(f"--- [FAISS EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Direct Detail-Specific Response via Cloudflare Workers AI
+        # 4. Generate Direct Precision Response via Cloudflare Workers AI
         answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -170,22 +170,22 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        system_instruction = f"""You are a Master AI Document Analyst & Technical Educator.
-Your task is to provide a direct, exact, highly detailed, and specific answer based strictly on the provided Document Context.
+        system_instruction = f"""You are a Master AI Document Analyst.
+Provide ONLY the direct, accurate, top-matched result with detail-specific information.
 
-RULES FOR DIRECT & ACCURATE RESPONSES:
-1. Answer the user's question DIRECTLY without artificial section titles or template intros (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
-2. Detail every relevant concept, step, definition, formula, or specification present in the context thoroughly.
-3. Use bold text for key terms (**Term**) and clear bullet points or numbered lists where helpful.
+RULES:
+1. Answer the user's query DIRECTLY. Do NOT include filler intros, conversational pleasantries, or artificial section headers (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
+2. Detail every relevant concept, step, definition, number, or specification present in the context.
+3. Use clear bullet points or bold text where helpful for readability.
 4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-5. Base your response strictly on the provided document context without making up unverified information.
+5. Base your response strictly on the provided DOCUMENT CONTEXT.
 
 DOCUMENT CONTEXT:
 {context}"""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a direct, highly accurate, and detail-specific answer for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a direct, detail-specific answer for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -227,7 +227,7 @@ DOCUMENT CONTEXT:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Direct Detail-Specific Fallback Synthesizer (No Artificial Template Section Titles)
+        # Direct Fallback Synthesizer
         body_paragraphs = []
         for idx, chunk in enumerate(retrieved_chunks[:8]):
             page_num = chunk["metadata"].get("page_number", "?")

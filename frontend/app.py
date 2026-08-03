@@ -49,7 +49,7 @@ def load_css():
 
 load_css()
 
-# Session State Initialization
+# Session State & Permanent Auto-Login Initialization
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "user_email" not in st.session_state:
@@ -58,6 +58,8 @@ if "user_name" not in st.session_state:
     st.session_state.user_name = ""
 if "current_filename" not in st.session_state:
     st.session_state.current_filename = None
+if "active_documents" not in st.session_state:
+    st.session_state.active_documents = []
 if "doc_metadata" not in st.session_state:
     st.session_state.doc_metadata = None
 if "session_id" not in st.session_state:
@@ -65,7 +67,7 @@ if "session_id" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "system_prompt" not in st.session_state:
-    st.session_state.system_prompt = "You are an expert AI Document Assistant. Provide accurate, detailed explanations based strictly on the provided document context."
+    st.session_state.system_prompt = "You are an expert AI Document Assistant. Provide direct, accurate, detail-specific explanations based strictly on the provided documents."
 if "active_nav" not in st.session_state:
     st.session_state.active_nav = "💬 Chat"
 if "top_k" not in st.session_state:
@@ -175,6 +177,7 @@ with st.sidebar:
         st.session_state.user_name = ""
         st.session_state.messages = []
         st.session_state.current_filename = None
+        st.session_state.active_documents = []
         st.session_state.data_loaded = False
         st.query_params.clear()
         st.rerun()
@@ -190,9 +193,18 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Upload New Document Button
-    with st.expander("+ Upload New PDF Document", expanded=(st.session_state.active_nav == "📥 Upload Document")):
+    # Upload New Document Section with Multi-Document Choices
+    with st.expander("+ Upload PDF Document", expanded=(st.session_state.active_nav == "📥 Upload Document")):
         uploaded_file = st.file_uploader("Choose PDF", type=["pdf"], label_visibility="collapsed")
+        
+        st.markdown("<p style='font-size:0.85rem; font-weight:600; color:#1E293B; margin-top:8px;'>Upload Action:</p>", unsafe_allow_html=True)
+        upload_action = st.radio(
+            "Upload Action Radio",
+            ["➕ Add Document to Current Conversation", "💬 Start New Chat with this Document"],
+            key="upload_action_choice",
+            label_visibility="collapsed"
+        )
+
         if uploaded_file is not None:
             if st.button("Submit & Index PDF", use_container_width=True):
                 with st.spinner("Uploading to Storage Bucket & Indexing..."):
@@ -203,20 +215,33 @@ with st.sidebar:
                         up_resp = requests.post(f"{target_backend}/api/upload", files=files, data=data, timeout=180)
                         if up_resp.status_code == 200:
                             up_data = up_resp.json()
-                            st.session_state.current_filename = up_data["filename"]
-                            st.session_state.doc_metadata = up_data["metadata"]
+                            fn = up_data["filename"]
 
                             # Process chunking
                             proc_resp = requests.post(f"{target_backend}/api/process", json={
-                                "filename": up_data["filename"],
+                                "filename": fn,
                                 "user_id": st.session_state.user_email,
                                 "strategy": "recursive",
                                 "chunk_size": 500,
                                 "chunk_overlap": 50
                             }, timeout=180)
+
                             if proc_resp.status_code == 200:
                                 b_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
-                                st.success(f"'{up_data['filename']}' saved and indexed!")
+
+                                if upload_action == "💬 Start New Chat with this Document":
+                                    st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
+                                    st.session_state.messages = []
+                                    st.session_state.current_filename = fn
+                                    st.session_state.active_documents = [fn]
+                                    st.success(f"Started new chat with '{fn}'!")
+                                else:
+                                    # Add to current conversation
+                                    if fn not in st.session_state.active_documents:
+                                        st.session_state.active_documents.append(fn)
+                                    st.session_state.current_filename = fn
+                                    st.success(f"Added '{fn}' to current conversation!")
+
                                 st.session_state.active_nav = "💬 Chat"
                                 st.rerun()
                             else:
@@ -246,9 +271,12 @@ with main_col:
 
     st.divider()
 
-    # VIEW 1: MAIN CHAT VIEW (Rendered Markdown Formatting)
+    # VIEW 1: MAIN CHAT VIEW
     if st.session_state.active_nav == "💬 Chat" or st.session_state.active_nav == "📥 Upload Document":
-        if st.session_state.current_filename:
+        if st.session_state.active_documents:
+            docs_str = ", ".join([f"**{d}**" for d in st.session_state.active_documents])
+            st.info(f"📁 Active Documents in Conversation: {docs_str}")
+        elif st.session_state.current_filename:
             st.info(f"📁 Active Document: **{st.session_state.current_filename}**")
         else:
             st.warning("⚠️ No document selected. Upload a PDF or select one from 'My Storage Bucket Files'.")
@@ -296,7 +324,7 @@ with main_col:
                     "filename": st.session_state.current_filename,
                     "system_prompt": st.session_state.system_prompt,
                     "top_k": st.session_state.top_k,
-                    "temperature": 0.2
+                    "temperature": 0.1
                 }
                 resp = requests.post(f"{target_backend}/api/chat", json=chat_payload, timeout=90)
                 if resp.status_code == 200:
@@ -348,13 +376,13 @@ with main_col:
                                 <p class="doc-item-title">📄 {f['filename']}</p>
                                 <p class="doc-item-meta">{size_mb} MB • Owner: {f.get('user_id', 'User')}</p>
                             </div>
-                            <span class="status-badge-green">✔ Active</span>
+                            <span class="status-badge-green">✔ Saved in Bucket</span>
                         </div>
                         """, unsafe_allow_html=True)
 
-                        c1, c2 = st.columns([1, 1])
+                        c1, c2, c3 = st.columns([1, 1, 1])
                         with c1:
-                            if st.button(f"🚀 Set Active & Analyze '{f['filename']}'", key=f"load_file_{f['filename']}"):
+                            if st.button(f"🚀 Set Active '{f['filename']}'", key=f"load_file_{f['filename']}"):
                                 with st.spinner(f"Indexing '{f['filename']}'..."):
                                     p_resp = requests.post(f"{BACKEND_URL}/api/process", json={
                                         "filename": f['filename'],
@@ -365,16 +393,28 @@ with main_col:
                                     }, timeout=180)
                                     if p_resp.status_code == 200:
                                         st.session_state.current_filename = f['filename']
+                                        if f['filename'] not in st.session_state.active_documents:
+                                            st.session_state.active_documents.append(f['filename'])
                                         st.session_state.active_nav = "💬 Chat"
                                         st.success(f"'{f['filename']}' set as active document!")
                                         st.rerun()
                         with c2:
+                            if st.button(f"➕ Add to Conversation", key=f"add_conv_{f['filename']}"):
+                                if f['filename'] not in st.session_state.active_documents:
+                                    st.session_state.active_documents.append(f['filename'])
+                                st.session_state.current_filename = f['filename']
+                                st.session_state.active_nav = "💬 Chat"
+                                st.success(f"Added '{f['filename']}' to conversation!")
+                                st.rerun()
+                        with c3:
                             if st.button(f"🗑️ Delete from Bucket", key=f"del_file_{f['filename']}"):
                                 requests.delete(f"{BACKEND_URL}/api/bucket/files/{f['filename']}", timeout=10)
+                                if f['filename'] in st.session_state.active_documents:
+                                    st.session_state.active_documents.remove(f['filename'])
                                 st.success(f"Deleted '{f['filename']}'!")
                                 st.rerun()
                 else:
-                    st.info("You haven't uploaded any documents yet. Use '+ Upload New PDF Document' in the sidebar.")
+                    st.info("You haven't uploaded any documents yet. Use '+ Upload PDF Document' in the sidebar.")
         except Exception as e:
             st.error(f"Error reading Storage Bucket: {e}")
 
@@ -402,6 +442,7 @@ with main_col:
                                         sess_data = sess_resp.json()
                                         st.session_state.session_id = s['session_id']
                                         st.session_state.current_filename = sess_data["session"]["filename"]
+                                        st.session_state.active_documents = [sess_data["session"]["filename"]]
                                         st.session_state.system_prompt = sess_data["session"]["system_prompt"]
                                         st.session_state.messages = [
                                             {

@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Optimized for Direct, Detail-Specific & Accurate Responses (No Template Sections)
+ * Optimized for Direct, High-Precision, Detail-Specific Answers Without Fluff
  */
 
 export default {
@@ -54,7 +54,7 @@ export default {
         );
       }
 
-      // 2. DIRECT DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. ULTRA-DIRECT ACCURATE DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/" || url.pathname === "") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ message: "Cloudflare Workers AI LLM API is Online", model: "@cf/meta/llama-3.1-8b-instruct" }), {
@@ -66,15 +66,15 @@ export default {
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        const directDetailSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
-Your task is to provide a direct, exact, highly detailed, and specific answer based strictly on the provided Document Context.
+        const directPrecisionPrompt = system_prompt || `You are a Master AI Document Analyst.
+Provide ONLY the direct, accurate, top-matched result with detail-specific information.
 
-RULES FOR DIRECT & ACCURATE RESPONSES:
-1. Answer the user's question DIRECTLY without artificial section titles or template intros (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
-2. Detail every relevant concept, step, definition, formula, or specification present in the context thoroughly.
-3. Use bold text for key terms and clear bullet points/numbered lists where helpful.
+STRICT RULES:
+1. Answer the user's query DIRECTLY. Do NOT include filler intros, conversational pleasantries, or artificial section headers.
+2. Detail every relevant concept, step, definition, number, or specification present in the DOCUMENT CONTEXT.
+3. Use clear bullet points or bold text where helpful for readability.
 4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-5. Base your response strictly on the provided document context without making up unverified information.`;
+5. Base your response strictly on the provided DOCUMENT CONTEXT. Never make up unverified information.`;
 
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
@@ -82,11 +82,11 @@ RULES FOR DIRECT & ACCURATE RESPONSES:
         const messages = [
           {
             role: "system",
-            content: `${directDetailSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
+            content: `${directPrecisionPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a direct, highly accurate, and detail-specific answer for:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, provide a direct, detail-specific answer for:\n\n"${userQuestion}"`,
           },
         ];
 
