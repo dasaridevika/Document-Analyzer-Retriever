@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
@@ -16,6 +16,7 @@ from backend.services.history_store import HistoryStore
 from backend.services.storage_bucket import StorageBucketManager
 from backend.services.rag_engine import RAGEngine
 from backend.services.worker_analyzer import analyze_extracted_data
+from backend.services.auth_firebase import verify_token
 from backend.config import DEFAULT_SYSTEM_PROMPT, BACKEND_HOST, BACKEND_PORT
 
 logging.basicConfig(level=logging.INFO)
@@ -23,8 +24,8 @@ logger = logging.getLogger("doc_analyser_backend")
 
 app = FastAPI(
     title="Document Analyser & Retriever API",
-    description="S3-Exclusive Storage Bucket RAG Backend with User-Level Privacy Isolation",
-    version="2.1.0"
+    description="Firebase Auth Secured S3 Storage Bucket RAG Backend",
+    version="2.2.0"
 )
 
 # CORS middleware for Streamlit integration
@@ -72,6 +73,9 @@ class AnalyzeRequest(BaseModel):
     title: Optional[str] = ""
     analysis_type: Optional[str] = "summary"
 
+class AuthVerifyRequest(BaseModel):
+    token_or_email: str
+
 # Endpoints
 
 @app.get("/api/health")
@@ -79,16 +83,30 @@ def health_check():
     stats = vector_store.get_stats()
     return {
         "status": "healthy",
+        "auth_provider": "Firebase Authentication",
         "vector_store_stats": stats,
         "embedding_model": embedding_service.model_name,
         "bucket_name": storage_bucket.bucket_name
+    }
+
+@app.post("/api/auth/verify")
+def verify_user_auth(req: AuthVerifyRequest):
+    """
+    Verifies Firebase token or email identity.
+    """
+    user_info = verify_token(req.token_or_email)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Invalid Firebase authentication token or email.")
+    return {
+        "status": "authenticated",
+        "user": user_info
     }
 
 def _save_and_parse_pdf_to_s3(file: UploadFile, user_id: str = "default_user") -> Dict[str, Any]:
     file.file.seek(0)
     file_bytes = file.file.read()
 
-    # Save to S3 / Storage Bucket with user_id metadata
+    # Save to Storage Bucket with Firebase user_id metadata
     bucket_info = storage_bucket.save_file(file.filename, file_bytes, user_id=user_id)
 
     # Parse PDF text in memory
@@ -104,7 +122,7 @@ async def upload_pdf(
     user_id: str = Form("default_user")
 ):
     """
-    Uploads PDF file directly into Storage Bucket tagged with user_id.
+    Uploads PDF file directly into Storage Bucket tagged with Firebase user_id.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -221,9 +239,6 @@ async def chat_endpoint(req: ChatRequest):
 
 @app.get("/api/bucket/files")
 async def list_bucket_files(user_id: Optional[str] = Query(None)):
-    """
-    Lists files uploaded strictly by the requested user_id.
-    """
     files = await run_in_threadpool(storage_bucket.list_files, user_id=user_id)
     return {
         "bucket_name": storage_bucket.bucket_name,
@@ -240,9 +255,6 @@ async def delete_bucket_file(filename: str):
 
 @app.get("/api/sessions")
 async def list_sessions(user_id: Optional[str] = Query(None)):
-    """
-    Lists chat sessions created strictly by the requested user_id.
-    """
     return await run_in_threadpool(history_store.list_sessions, user_id=user_id)
 
 @app.get("/api/sessions/{session_id}")

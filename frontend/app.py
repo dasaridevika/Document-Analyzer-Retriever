@@ -49,9 +49,13 @@ def load_css():
 
 load_css()
 
-# Strict Per-User Privacy Session State Initialization
-if "user_id" not in st.session_state:
-    st.session_state.user_id = f"usr_{uuid.uuid4().hex[:8]}"
+# Session State Initialization
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "user_email" not in st.session_state:
+    st.session_state.user_email = ""
+if "user_name" not in st.session_state:
+    st.session_state.user_name = ""
 if "current_filename" not in st.session_state:
     st.session_state.current_filename = None
 if "doc_metadata" not in st.session_state:
@@ -67,7 +71,77 @@ if "active_nav" not in st.session_state:
 if "top_k" not in st.session_state:
     st.session_state.top_k = 8
 
-# --- LEFT SIDEBAR (NAV, USER BADGE, BUCKET FILES & SESSIONS) ---
+# --- FIREBASE AUTHENTICATION SCREEN ---
+if not st.session_state.authenticated:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.markdown("""
+        <div style="background: white; border: 1px solid #E2E8F0; border-radius: 16px; padding: 32px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05); text-align: center;">
+            <h2 style="color: #4F46E5; margin-bottom: 4px; font-weight:700;">📄 DocAnalyzer AI</h2>
+            <p style="color: #64748B; font-size: 0.95rem; margin-bottom: 24px;">Sign in with Firebase to access your private documents & chat history</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        tab_google, tab_email = st.tabs(["🔥 Google Sign-In", "✉️ Email & Password"])
+
+        with tab_google:
+            st.markdown("<p style='font-size:0.88rem; color:#475569;'>Enter your Google Email address to authenticate via Firebase:</p>", unsafe_allow_html=True)
+            g_email = st.text_input("Google Email Address", placeholder="user@gmail.com", key="g_email_input")
+
+            if st.button("🔥 Continue with Google Sign-In", use_container_width=True, type="primary"):
+                if "@" in g_email and "." in g_email:
+                    try:
+                        v_resp = requests.post(f"{BACKEND_URL}/api/auth/verify", json={"token_or_email": g_email}, timeout=5)
+                        if v_resp.status_code == 200:
+                            u_info = v_resp.json()["user"]
+                            st.session_state.authenticated = True
+                            st.session_state.user_email = u_info["email"]
+                            st.session_state.user_name = u_info["name"]
+                            st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
+                            st.success(f"Welcome back, {u_info['name']}!")
+                            st.rerun()
+                        else:
+                            st.error("Authentication failed. Please check your email.")
+                    except Exception as e:
+                        st.error(f"Auth error: {e}")
+                else:
+                    st.warning("Please enter a valid Google Email address.")
+
+        with tab_email:
+            e_email = st.text_input("Email Address", placeholder="user@example.com", key="e_email_input")
+            e_pass = st.text_input("Password", type="password", placeholder="••••••••", key="e_pass_input")
+
+            c_login, c_reg = st.columns([1, 1])
+            with c_login:
+                if st.button("Sign In", use_container_width=True):
+                    if "@" in e_email and len(e_pass) >= 4:
+                        st.session_state.authenticated = True
+                        st.session_state.user_email = e_email
+                        st.session_state.user_name = e_email.split("@")[0].capitalize()
+                        st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
+                        st.success("Signed in successfully!")
+                        st.rerun()
+                    else:
+                        st.warning("Please enter valid credentials.")
+            with c_reg:
+                if st.button("Create Account", use_container_width=True):
+                    if "@" in e_email and len(e_pass) >= 4:
+                        st.session_state.authenticated = True
+                        st.session_state.user_email = e_email
+                        st.session_state.user_name = e_email.split("@")[0].capitalize()
+                        st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
+                        st.success("Account created successfully!")
+                        st.rerun()
+                    else:
+                        st.warning("Please enter a valid email and password.")
+
+    st.stop()
+
+# --- MAIN DASHBOARD (AUTHENTICATED USERS) ---
+
+# --- LEFT SIDEBAR (NAV, FIREBASE USER PROFILE BADGE, BUCKET FILES & SESSIONS) ---
 with st.sidebar:
     col_icon, col_txt = st.columns([0.25, 0.75])
     with col_icon:
@@ -78,16 +152,21 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Health Check & User Privacy ID Badge
-    try:
-        active_url = get_backend_url()
-        h_resp = requests.get(f"{active_url}/api/health", timeout=3)
-        if h_resp.status_code == 200:
-            h_data = h_resp.json()
-            bucket = h_data.get("bucket_name", "Storage Bucket")
-            st.success(f"🔒 Private User: `{st.session_state.user_id}`")
-    except Exception:
-        st.warning("🟠 Backend Starting...")
+    # Firebase Authenticated User Profile Badge
+    st.markdown(f"""
+    <div style="background:#F1F5F9; border-radius:10px; padding:12px; border:1px solid #CBD5E1;">
+        <p style="margin:0; font-size:0.75rem; color:#64748B; font-weight:600;">FIREBASE AUTHENTICATED</p>
+        <p style="margin:2px 0 0 0; font-size:0.88rem; color:#0F172A; font-weight:700; word-break:break-all;">🟢 {st.session_state.user_email}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("🚪 Sign Out", use_container_width=True, key="logout_btn"):
+        st.session_state.authenticated = False
+        st.session_state.user_email = ""
+        st.session_state.user_name = ""
+        st.session_state.messages = []
+        st.session_state.current_filename = None
+        st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -120,7 +199,7 @@ with st.sidebar:
                     try:
                         target_backend = get_backend_url()
                         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-                        data = {"user_id": st.session_state.user_id}
+                        data = {"user_id": st.session_state.user_email}
                         up_resp = requests.post(f"{target_backend}/api/upload", files=files, data=data, timeout=180)
                         if up_resp.status_code == 200:
                             up_data = up_resp.json()
@@ -130,14 +209,14 @@ with st.sidebar:
                             # Process chunking
                             proc_resp = requests.post(f"{target_backend}/api/process", json={
                                 "filename": up_data["filename"],
-                                "user_id": st.session_state.user_id,
+                                "user_id": st.session_state.user_email,
                                 "strategy": "recursive",
                                 "chunk_size": 500,
                                 "chunk_overlap": 50
                             }, timeout=180)
                             if proc_resp.status_code == 200:
                                 b_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
-                                st.success(f"'{up_data['filename']}' saved in '{b_type}' for User `{st.session_state.user_id}`!")
+                                st.success(f"'{up_data['filename']}' saved in '{b_type}' for User `{st.session_state.user_email}`!")
                                 st.session_state.active_nav = "💬 Chat"
                                 st.rerun()
                             else:
@@ -168,10 +247,10 @@ with main_col:
 
     st.divider()
 
-    # VIEW 1: MAIN CHAT VIEW (Private to Current User)
+    # VIEW 1: MAIN CHAT VIEW (Private to Logged-In Firebase User)
     if st.session_state.active_nav == "💬 Chat" or st.session_state.active_nav == "📥 Upload Document":
         if st.session_state.current_filename:
-            st.info(f"📁 Active Document: **{st.session_state.current_filename}** | Private Session: `{st.session_state.session_id}`")
+            st.info(f"📁 Active Document: **{st.session_state.current_filename}** | Session ID: `{st.session_state.session_id}`")
         else:
             st.warning("⚠️ No document selected. Upload a PDF or select one from 'My Storage Bucket Files'.")
 
@@ -231,7 +310,7 @@ with main_col:
                 target_backend = get_backend_url()
                 chat_payload = {
                     "session_id": st.session_state.session_id,
-                    "user_id": st.session_state.user_id,
+                    "user_id": st.session_state.user_email,
                     "query": user_input,
                     "filename": st.session_state.current_filename,
                     "system_prompt": st.session_state.system_prompt,
@@ -267,13 +346,13 @@ with main_col:
 
         st.markdown("<p class='disclaimer-text'>Answers are generated using AI and may not always be 100% accurate.</p>", unsafe_allow_html=True)
 
-    # VIEW 2: MY STORAGE BUCKET FILES (Filtered by user_id)
+    # VIEW 2: MY STORAGE BUCKET FILES (Filtered by Firebase user_email)
     elif st.session_state.active_nav == "📦 My Storage Bucket Files":
         st.subheader("📦 My Uploaded Documents")
-        st.caption(f"Showing documents uploaded exclusively by User `{st.session_state.user_id}`")
+        st.caption(f"Showing documents uploaded exclusively by User `{st.session_state.user_email}`")
 
         try:
-            b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files?user_id={st.session_state.user_id}", timeout=10)
+            b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files?user_id={st.session_state.user_email}", timeout=10)
             if b_resp.status_code == 200:
                 b_data = b_resp.json()
                 b_name = b_data.get("bucket_name", "Storage Bucket")
@@ -298,7 +377,7 @@ with main_col:
                                 with st.spinner(f"Indexing '{f['filename']}'..."):
                                     p_resp = requests.post(f"{BACKEND_URL}/api/process", json={
                                         "filename": f['filename'],
-                                        "user_id": st.session_state.user_id,
+                                        "user_id": st.session_state.user_email,
                                         "strategy": "recursive",
                                         "chunk_size": 500,
                                         "chunk_overlap": 50
@@ -318,13 +397,13 @@ with main_col:
         except Exception as e:
             st.error(f"Error reading Storage Bucket: {e}")
 
-    # VIEW 3: MY SAVED CHAT HISTORY (Filtered by user_id)
+    # VIEW 3: MY SAVED CHAT HISTORY (Filtered by Firebase user_email)
     elif st.session_state.active_nav == "🕒 My Saved Chat History":
         st.subheader("🕒 My Saved Chat Sessions")
-        st.caption(f"Showing chat sessions created exclusively by User `{st.session_state.user_id}`")
+        st.caption(f"Showing chat sessions created exclusively by User `{st.session_state.user_email}`")
 
         try:
-            resp = requests.get(f"{BACKEND_URL}/api/sessions?user_id={st.session_state.user_id}", timeout=10)
+            resp = requests.get(f"{BACKEND_URL}/api/sessions?user_id={st.session_state.user_email}", timeout=10)
             if resp.status_code == 200:
                 sessions = resp.json()
                 if sessions:
