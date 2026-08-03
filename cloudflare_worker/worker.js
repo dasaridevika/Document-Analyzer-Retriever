@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Optimized for High-Precision, Detail-Specific & Rendered Markdown Responses
+ * Optimized for Direct, Detail-Specific & Accurate Responses (No Template Sections)
  */
 
 export default {
@@ -54,7 +54,7 @@ export default {
         );
       }
 
-      // 2. MASTER DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. DIRECT DETAIL-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/" || url.pathname === "") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ message: "Cloudflare Workers AI LLM API is Online", model: "@cf/meta/llama-3.1-8b-instruct" }), {
@@ -66,14 +66,15 @@ export default {
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        const masterSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
-Your goal is to provide exact, highly detailed, precise, and specific answers formatted in beautiful GitHub Markdown like ChatGPT.
+        const directDetailSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
+Your task is to provide a direct, exact, highly detailed, and specific answer based strictly on the provided Document Context.
 
-STRICT INSTRUCTIONS FOR ACCURACY & FORMATTING:
-1. **Executive Summary**: Start with a clear section heading '### 🎯 Executive Summary' and a direct callout answer.
-2. **Structured Breakdown / List Out**: Use '###' section headings, bold terms ('**Term**'), bullet points ('- Item'), and numbered lists to detail EVERY topic, step, formula, or finding.
-3. **Page Citations**: Cite exact page numbers naturally in the text (e.g. [Page 4], [Page 12]).
-4. **Factual Accuracy**: Base your answer strictly on the provided DOCUMENT CONTEXT. Never make up unverified information.`;
+RULES FOR DIRECT & ACCURATE RESPONSES:
+1. Answer the user's question DIRECTLY without artificial section titles or template intros (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
+2. Detail every relevant concept, step, definition, formula, or specification present in the context thoroughly.
+3. Use bold text for key terms and clear bullet points/numbered lists where helpful.
+4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
+5. Base your response strictly on the provided document context without making up unverified information.`;
 
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
@@ -81,11 +82,11 @@ STRICT INSTRUCTIONS FOR ACCURACY & FORMATTING:
         const messages = [
           {
             role: "system",
-            content: `${masterSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
+            content: `${directDetailSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a comprehensive, beautifully formatted Markdown response for:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a direct, highly accurate, and detail-specific answer for:\n\n"${userQuestion}"`,
           },
         ];
 

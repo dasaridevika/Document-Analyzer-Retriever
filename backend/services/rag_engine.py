@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
-    FAISS-Powered Rendered Markdown RAG Engine:
-    Delivers exact, accurate, and comprehensive document-backed explanations in beautiful GitHub Markdown.
+    FAISS-Powered Direct Detail-Specific RAG Engine:
+    Delivers exact, highly detailed, direct document-backed explanations with natural page citations.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -42,7 +42,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your documents"
             return {
-                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the full document to provide a detailed, accurate explanation with rendered page citations.",
+                "answer": f"Hello! I am your AI Master Document Assistant. Ask me any question about {doc_name}, and I will analyze the document to provide a direct, highly detailed answer with page citations.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -102,7 +102,7 @@ class RAGEngine:
             context_blocks.append(f"--- [FAISS EXCERPT {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate Rendered Markdown Response via Cloudflare Workers AI
+        # 4. Generate Direct Detail-Specific Response via Cloudflare Workers AI
         answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -171,20 +171,21 @@ class RAGEngine:
         }
 
         system_instruction = f"""You are a Master AI Document Analyst & Technical Educator.
-Your goal is to provide exact, highly accurate, detail-specific answers formatted in beautiful GitHub Markdown like ChatGPT.
+Your task is to provide a direct, exact, highly detailed, and specific answer based strictly on the provided Document Context.
 
-MARKDOWN FORMATTING INSTRUCTIONS:
-1. **Executive Summary**: Start with a clear section heading `### 🎯 Executive Summary` and a direct callout summary.
-2. **Structured Breakdown / List Out**: Use `###` section headings, bold terms (`**Term**`), and clean bullet lists (`- Item`).
-3. **Page Citations**: Cite exact page numbers naturally (e.g. `[Page 4]`, `[Page 12]`).
-4. **Accuracy Guarantee**: Base your answer strictly on the provided FAISS document context.
+RULES FOR DIRECT & ACCURATE RESPONSES:
+1. Answer the user's question DIRECTLY without artificial section titles or template intros (do NOT use "Executive Summary", "Detailed Breakdown", or "Key Takeaways").
+2. Detail every relevant concept, step, definition, formula, or specification present in the context thoroughly.
+3. Use bold text for key terms (**Term**) and clear bullet points or numbered lists where helpful.
+4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
+5. Base your response strictly on the provided document context without making up unverified information.
 
 DOCUMENT CONTEXT:
 {context}"""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a comprehensive, beautifully formatted Markdown response for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided FAISS document context, write a direct, highly accurate, and detail-specific answer for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -226,16 +227,7 @@ DOCUMENT CONTEXT:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Rendered Markdown Fallback Synthesizer
-        pages_referenced = sorted(list(set([
-            c["metadata"].get("page_number") for c in retrieved_chunks if c["metadata"].get("page_number")
-        ])))
-        page_str = f" (Pages {', '.join(map(str, pages_referenced))})" if pages_referenced else ""
-
-        paragraphs = [
-            f"### 🎯 Executive Summary\nBased on an exact analysis of the FAISS-indexed document context{page_str}, here is the detailed breakdown answering **\"{query}\"**:\n"
-        ]
-
+        # Direct Detail-Specific Fallback Synthesizer (No Artificial Template Section Titles)
         body_paragraphs = []
         for idx, chunk in enumerate(retrieved_chunks[:8]):
             page_num = chunk["metadata"].get("page_number", "?")
@@ -243,11 +235,8 @@ DOCUMENT CONTEXT:
             lines = [l.strip() for l in text.splitlines() if l.strip()]
 
             if lines:
-                heading = lines[0][:70] if len(lines[0]) < 70 else f"Section Breakdown (Page {page_num})"
+                heading = lines[0][:70] if len(lines[0]) < 70 else f"Page {page_num}"
                 body = " ".join(lines[1:]) if len(lines) > 1 else lines[0]
-                body_paragraphs.append(f"#### {idx+1}. **{heading}** *(Page {page_num})*\n{body}")
+                body_paragraphs.append(f"{idx+1}. **{heading}** [Page {page_num}]\n{body}")
 
-        paragraphs.append("\n\n".join(body_paragraphs))
-        paragraphs.append("\n\n### 📌 Key Takeaways\n- **Accuracy Guaranteed**: Retrieved directly from FAISS vector search across your document.\n- **Page Citations**: References exact document page numbers.")
-
-        return "\n\n".join(paragraphs)
+        return "\n\n".join(body_paragraphs)
