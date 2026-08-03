@@ -13,19 +13,19 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Robust Multi-Endpoint Backend Resolver
+# Robust Endpoint Resolver (Verifies exact FastAPI 'DocAnalyzer API' service)
 def resolve_working_backend_url() -> str:
     if "cached_backend_url" in st.session_state and st.session_state.cached_backend_url:
         try:
             r = requests.get(f"{st.session_state.cached_backend_url}/api/health", timeout=1)
-            if r.status_code == 200:
+            if r.status_code == 200 and r.json().get("service") == "DocAnalyzer API":
                 return st.session_state.cached_backend_url
         except Exception:
             pass
 
     env_backend = os.getenv("BACKEND_URL", "").rstrip("/")
     railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").rstrip("/")
-    port = os.getenv("PORT", os.getenv("BACKEND_PORT", "8000"))
+    port = os.getenv("BACKEND_PORT", os.getenv("PORT", "8000"))
 
     candidates = []
     if env_backend:
@@ -34,8 +34,8 @@ def resolve_working_backend_url() -> str:
         candidates.append(f"https://{railway_domain}")
         candidates.append(f"http://{railway_domain}")
 
-    # Local & Docker Host Candidates
-    for host in ["0.0.0.0", "127.0.0.1", "localhost"]:
+    # Local & Internal Container Host Candidates
+    for host in ["127.0.0.1", "0.0.0.0", "localhost"]:
         for p in [port, "8000", "8001", "5000"]:
             url = f"http://{host}:{p}"
             if url not in candidates:
@@ -45,13 +45,24 @@ def resolve_working_backend_url() -> str:
         try:
             r = requests.get(f"{candidate}/api/health", timeout=1.5)
             if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict) and data.get("service") == "DocAnalyzer API":
+                    st.session_state.cached_backend_url = candidate
+                    return candidate
+        except Exception:
+            pass
+
+    # Secondary Probing if health check is starting
+    for candidate in candidates:
+        try:
+            r = requests.get(candidate, timeout=1)
+            if r.status_code == 200:
                 st.session_state.cached_backend_url = candidate
                 return candidate
         except Exception:
             pass
 
-    # Default fallback
-    fallback = candidates[0] if candidates else f"http://0.0.0.0:{port}"
+    fallback = candidates[0] if candidates else f"http://127.0.0.1:{port}"
     st.session_state.cached_backend_url = fallback
     return fallback
 
