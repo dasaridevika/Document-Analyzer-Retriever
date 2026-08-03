@@ -49,7 +49,7 @@ def load_css():
 
 load_css()
 
-# Session State & Permanent Auto-Login Initialization
+# Session State Initialization
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "user_email" not in st.session_state:
@@ -73,7 +73,7 @@ if "top_k" not in st.session_state:
 if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
 
-# PERMANENT BROWSER AUTO-LOGIN (Reads Query Params in Browser URL)
+# PERMANENT BROWSER AUTO-LOGIN
 query_params = st.query_params
 if not st.session_state.authenticated:
     param_user = query_params.get("user") or query_params.get("email")
@@ -148,7 +148,7 @@ if not st.session_state.authenticated:
 
     st.stop()
 
-# --- MAIN DASHBOARD (LOGGED IN USER) ---
+# --- MAIN DASHBOARD ---
 
 # --- LEFT SIDEBAR (NAV & USER BADGE) ---
 with st.sidebar:
@@ -246,7 +246,7 @@ with main_col:
 
     st.divider()
 
-    # VIEW 1: MAIN CHAT VIEW
+    # VIEW 1: MAIN CHAT VIEW (Rendered Markdown Formatting)
     if st.session_state.active_nav == "💬 Chat" or st.session_state.active_nav == "📥 Upload Document":
         if st.session_state.current_filename:
             st.info(f"📁 Active Document: **{st.session_state.current_filename}**")
@@ -262,37 +262,19 @@ with main_col:
                     role = msg["role"]
                     content = msg["content"]
                     sources = msg.get("sources", [])
-                    timestamp = msg.get("timestamp", datetime.datetime.now().strftime("%I:%M %p"))
 
                     if role == "user":
-                        st.markdown(f"""
-                        <div class="chat-row-user">
-                            <div style="display:flex; flex-direction:column; align-items:flex-end;">
-                                <div class="chat-bubble-user">{content}</div>
-                                <div class="chat-timestamp">{timestamp}</div>
-                            </div>
-                            <div class="chat-avatar-user">👤</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        with st.chat_message("user", avatar="👤"):
+                            st.markdown(content)
                     else:
-                        sources_html = ""
-                        if sources:
-                            for s in sources[:4]:
-                                pg = s.get("page_number", 1)
-                                sources_html += f"""<div class="source-pill">📄 Source: Page {pg}</div> """
-
-                        st.markdown(f"""
-                        <div class="chat-row-bot">
-                            <div class="chat-avatar-bot">🤖</div>
-                            <div style="width:100%;">
-                                <div class="chat-bubble-bot">
-                                    <div>{content}</div>
-                                    {f'<div style="margin-top:8px;">{sources_html}</div>' if sources_html else ''}
-                                </div>
-                                <div class="chat-timestamp">{timestamp}</div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        with st.chat_message("assistant", avatar="🤖"):
+                            st.markdown(content)
+                            if sources:
+                                sources_html = "".join([
+                                    f"""<span class="source-pill">📄 Page {s.get('page_number', 1)}</span> """
+                                    for s in sources[:4]
+                                ])
+                                st.markdown(f"<div style='margin-top:10px;'>{sources_html}</div>", unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         user_input = st.chat_input("Ask a question about your document...")

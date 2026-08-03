@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker for Master AI Document Analysis & BGE Large Embeddings
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Formatted for Clean, Plain Text Paragraph Responses (No ### Markdown symbols)
+ * Formatted for Rich, Rendered Markdown Outputs
  */
 
 export default {
@@ -54,7 +54,7 @@ export default {
         );
       }
 
-      // 2. PLAIN TEXT PARAGRAPH LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. RICH RENDERED MARKDOWN LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       if (url.pathname === "/analyze" || url.pathname === "/chat" || url.pathname === "/") {
         if (request.method !== "POST") {
           return new Response(JSON.stringify({ error: "Method not allowed" }), {
@@ -66,15 +66,15 @@ export default {
         const body = await request.json();
         const { text = "", title = "", query = "", system_prompt = "", prompt = "" } = body;
 
-        const plainTextSystemPrompt = system_prompt || `You are an expert AI Document Assistant.
-Your goal is to provide comprehensive, detailed, and highly accurate explanations written in clean, plain text paragraphs.
+        const richMarkdownSystemPrompt = system_prompt || `You are a Master AI Document Analyst & Technical Educator.
+Your goal is to provide exact, highly detailed, and beautifully structured answers in Markdown formatting like ChatGPT.
 
-STRICT FORMATTING RULES:
-1. Do NOT use markdown symbols like ###, ####, **, --, or raw formatting tags.
-2. Write in fluent, natural, well-developed text paragraphs.
-3. Detail every concept, step, definition, and data point clearly and thoroughly.
-4. Cite page numbers naturally in plain text (e.g. (Page 4), (Page 12)).
-5. Base your response strictly on the provided document context without hallucinating.`;
+FORMATTING GUIDELINES:
+1. Use ### for major section titles (e.g. ### Executive Summary, ### Detailed Breakdown).
+2. Use bold text for key terms, subjects, numbers, and definitions (**Term**).
+3. Use bullet points and numbered lists to structure explanations clearly.
+4. Cite page numbers naturally in the text (e.g. [Page 4], [Page 12]).
+5. Base your response strictly on the provided document context.`;
 
         const userQuestion = query || prompt || text;
         const contextContent = text || "";
@@ -82,11 +82,11 @@ STRICT FORMATTING RULES:
         const messages = [
           {
             role: "system",
-            content: `${plainTextSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
+            content: `${richMarkdownSystemPrompt}\n\nDOCUMENT CONTEXT:\n${contextContent}`,
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a detailed plain text answer in natural paragraphs for:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a comprehensive, beautifully structured Markdown response for:\n\n"${userQuestion}"`,
           },
         ];
 
@@ -105,11 +105,7 @@ STRICT FORMATTING RULES:
           });
         }
 
-        let responseText = llmResponse.response || llmResponse;
-        if (typeof responseText === "string") {
-          // Clean any residual markdown heading symbols
-          responseText = responseText.replace(/^#{1,6}\s+/gm, "").replace(/\*\*/g, "");
-        }
+        const responseText = llmResponse.response || llmResponse;
 
         return new Response(
           JSON.stringify({
