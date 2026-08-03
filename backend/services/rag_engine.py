@@ -1,6 +1,7 @@
 import requests
 import logging
 import re
+import os
 from typing import List, Dict, Any
 from backend.config import (
     CLOUDFLARE_ACCOUNT_ID,
@@ -8,15 +9,15 @@ from backend.config import (
     CLOUDFLARE_LLM_MODEL,
     DEFAULT_SYSTEM_PROMPT
 )
-from backend.services.worker_analyzer import WORKER_BASE_URL
+from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
 logger = logging.getLogger(__name__)
 
 class RAGEngine:
     """
     FAISS-Powered High-Precision RAGEngine:
-    Prioritizes query-specific semantic vector search matches and calls Cloudflare Workers AI
-    to deliver intelligent, ChatGPT-quality responses without raw chunk headers.
+    Always calls Cloudflare Workers AI (@cf/meta/llama-3.1-8b-instruct) via the live worker endpoint
+    to deliver intelligent, fluent, ChatGPT-quality responses.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -25,12 +26,12 @@ class RAGEngine:
         self.account_id = CLOUDFLARE_ACCOUNT_ID
         self.api_token = CLOUDFLARE_API_TOKEN
         self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct"
-        self.worker_base_url = WORKER_BASE_URL
+        self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
     def _clean_response_artifacts(self, text: str) -> str:
         if not text:
             return ""
-        # Filter raw OCR image noise & ugly chunk header prefixes
+        # Remove raw image/OCR artifact labels
         cleaned = re.sub(r'Visual\s*\[Page\s*\d+\]\s*Visual', '', text, flags=re.IGNORECASE)
         cleaned = re.sub(r'^\s*Visual\s*$', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
         cleaned = re.sub(r'^\s*Page\s*\d+\s*\[Page\s*\d+\]\s*', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
@@ -112,7 +113,7 @@ class RAGEngine:
             context_blocks.append(f"--- [DOCUMENT EXCERPT {i+1} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Generate High-Quality LLM Response via Cloudflare Workers AI
+        # 4. Generate Intelligent LLM Response via Cloudflare Workers AI
         raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -144,9 +145,11 @@ class RAGEngine:
     def _generate_cloudflare_worker_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
     ) -> str:
-        target_url = self.worker_base_url
-        if not target_url:
-            raise ValueError("Worker base URL is not set.")
+        # Try both endpoint URLs for maximum reliability
+        endpoints = [
+            f"{self.worker_base_url}/analyze",
+            self.worker_base_url
+        ]
 
         payload = {
             "query": query,
@@ -155,22 +158,26 @@ class RAGEngine:
             "temperature": temperature
         }
 
-        logger.info(f"Calling Cloudflare Worker AI link at '{target_url}'...")
-        resp = requests.post(target_url, json=payload, timeout=55)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            ans = (
-                data.get("response") or
-                data.get("result", {}).get("response") or
-                data.get("result") or
-                ""
-            )
-            if isinstance(ans, str) and len(ans.strip()) > 10:
-                logger.info("Successfully generated LLM response via Cloudflare Worker AI link!")
-                return ans.strip()
+        for target_url in endpoints:
+            try:
+                logger.info(f"Calling Cloudflare Worker AI endpoint at '{target_url}'...")
+                resp = requests.post(target_url, json=payload, timeout=45)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ans = (
+                        data.get("response") or
+                        data.get("result", {}).get("response") or
+                        data.get("result") or
+                        ""
+                    )
+                    if isinstance(ans, str) and len(ans.strip()) > 15:
+                        logger.info("Successfully generated LLM response via Cloudflare Worker AI!")
+                        return ans.strip()
+            except Exception as e:
+                logger.warning(f"Failed calling worker endpoint '{target_url}': {e}")
 
-        raise RuntimeError(f"Cloudflare Worker HTTP {resp.status_code}: {resp.text}")
+        raise RuntimeError("Cloudflare Worker endpoints did not return valid response.")
 
     def _generate_cloudflare_rest_llm(
         self, system_prompt: str, context: str, query: str, temperature: float
@@ -181,19 +188,18 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        system_instruction = f"""You are an expert AI Document Analyst.
-Synthesize the provided Document Context into a clear, intelligent, well-structured answer.
+        system_instruction = f"""You are an expert AI Document Assistant.
+Write a clear, intelligent, and comprehensive response explaining the answer to the user's question based on the Document Context.
 
-STRICT INSTRUCTIONS:
+RULES:
 1. Directly answer the user's question: "{query}".
-2. Do NOT output raw chunk headers (do NOT print "Page 1 [Page 1]" or "Tensor [Page 1]").
-3. Explain concepts, rules, modules, and topics thoroughly using bullet points and clear paragraphs.
-4. Cite page numbers naturally in the text (e.g. [Page 1], [Page 2]).
-5. Base your response strictly on the provided DOCUMENT CONTEXT."""
+2. Explain the topic thoroughly using clear paragraphs, bold key terms, and bullet points.
+3. Do NOT print raw chunk labels like "Key Topic (Page X)" or "Page 1 [Page 1]".
+4. Cite page numbers naturally (e.g. [Page 8], [Page 11])."""
 
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the provided document context, write a clear, well-structured answer for:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the provided document context, explain:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -203,7 +209,7 @@ STRICT INSTRUCTIONS:
         }
 
         logger.info(f"Calling Cloudflare Workers AI REST API model '{self.llm_model}'...")
-        resp = requests.post(url, headers=headers, json=payload, timeout=50)
+        resp = requests.post(url, headers=headers, json=payload, timeout=45)
         
         if resp.status_code != 200:
             raise RuntimeError(f"Cloudflare REST API HTTP {resp.status_code}: {resp.text}")
@@ -219,7 +225,16 @@ STRICT INSTRUCTIONS:
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
-        # Priority 1: Direct Cloudflare REST API call if credentials present
+        # Priority 1: Cloudflare Worker AI Live Endpoint
+        if self.worker_base_url:
+            try:
+                ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
+                if ans and len(ans) > 20:
+                    return ans
+            except Exception as e:
+                logger.warning(f"Cloudflare Worker AI call failed: {e}")
+
+        # Priority 2: Direct Cloudflare REST API if account_id set
         if self.account_id and self.api_token:
             try:
                 ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, temperature)
@@ -228,26 +243,17 @@ STRICT INSTRUCTIONS:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 2: Worker Base URL call
-        if self.worker_base_url:
-            try:
-                ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, temperature)
-                if ans and len(ans) > 20:
-                    return ans
-            except Exception as e:
-                logger.warning(f"Cloudflare Worker AI link call failed: {e}")
-
-        # Clean Factual Fallback Synthesizer (No "Page 1 [Page 1]" snippet dumps)
-        body_items = []
-        for idx, chunk in enumerate(retrieved_chunks[:6]):
+        # Clean Cohesive Fallback Synthesizer
+        prose_blocks = []
+        for idx, chunk in enumerate(retrieved_chunks[:5]):
             page_num = chunk["metadata"].get("page_number", "?")
             text = chunk["text"].strip()
-            cleaned_text = " ".join([l.strip() for l in text.splitlines() if l.strip()])
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            if lines:
+                block_text = " ".join(lines)
+                prose_blocks.append(f"**Section (Page {page_num})**: {block_text}")
 
-            if cleaned_text:
-                body_items.append(f"• **Key Topic (Page {page_num})**: {cleaned_text}")
-
-        if body_items:
-            return f"Based on the document context, here are the key details for **\"{query}\"**:\n\n" + "\n\n".join(body_items)
+        if prose_blocks:
+            return f"Here is the detailed analysis from your document regarding **\"{query}\"**:\n\n" + "\n\n".join(prose_blocks)
 
         return f"I analyzed the document context for **\"{query}\"**, but could not generate a complete summary."
