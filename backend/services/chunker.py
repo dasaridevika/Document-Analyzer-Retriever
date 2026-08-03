@@ -15,8 +15,8 @@ class DocumentChunker:
         pages_data: List[Dict[str, Any]],
         filename: str,
         strategy: str = "recursive",
-        chunk_size: int = 500,
-        chunk_overlap: int = 50
+        chunk_size: int = 800,
+        chunk_overlap: int = 100
     ) -> List[Dict[str, Any]]:
         return self.chunk_document(
             pages_data=pages_data,
@@ -31,8 +31,8 @@ class DocumentChunker:
         pages_data: List[Dict[str, Any]],
         filename: str,
         strategy: str = "recursive",
-        chunk_size: int = 500,
-        chunk_overlap: int = 50
+        chunk_size: int = 800,
+        chunk_overlap: int = 100
     ) -> List[Dict[str, Any]]:
         if strategy == "fixed":
             return DocumentChunker._fixed_size_chunking(pages_data, filename, chunk_size, chunk_overlap)
@@ -87,8 +87,8 @@ class DocumentChunker:
     def _recursive_character_chunking(
         pages_data: List[Dict[str, Any]],
         filename: str,
-        target_size: int = 500,
-        overlap: int = 50
+        target_size: int = 800,
+        overlap: int = 100
     ) -> List[Dict[str, Any]]:
         chunks = []
         chunk_index = 0
@@ -178,7 +178,7 @@ class DocumentChunker:
     def _page_aware_chunking(
         pages_data: List[Dict[str, Any]],
         filename: str,
-        target_size: int = 500
+        target_size: int = 800
     ) -> List[Dict[str, Any]]:
         chunks = []
         chunk_index = 0
@@ -202,7 +202,7 @@ class DocumentChunker:
                 })
                 chunk_index += 1
             else:
-                sub_chunks = DocumentChunker._sub_split_text(text, target_size, 50)
+                sub_chunks = DocumentChunker._sub_split_text(text, target_size, 100)
                 for i, sc in enumerate(sub_chunks):
                     chunks.append({
                         "chunk_id": f"{filename}_page_{page_num}_{i}",
@@ -222,7 +222,7 @@ class DocumentChunker:
     def _semantic_paragraph_chunking(
         pages_data: List[Dict[str, Any]],
         filename: str,
-        max_chunk_size: int = 600
+        max_chunk_size: int = 900
     ) -> List[Dict[str, Any]]:
         chunks = []
         chunk_index = 0
@@ -273,5 +273,4 @@ class DocumentChunker:
 
         return chunks
 
-# Class Alias for Backward Compatibility
 TextChunker = DocumentChunker
