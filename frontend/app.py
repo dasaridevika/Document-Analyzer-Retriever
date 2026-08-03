@@ -71,7 +71,7 @@ if "active_nav" not in st.session_state:
 if "top_k" not in st.session_state:
     st.session_state.top_k = 8
 
-# Auto-Remember Login via Query Params (Prevents re-entering email on refresh!)
+# Auto-Remember Login via Query Params
 query_params = st.query_params
 if not st.session_state.authenticated:
     remembered_user = query_params.get("user") or query_params.get("email")
@@ -80,7 +80,7 @@ if not st.session_state.authenticated:
         st.session_state.user_email = remembered_user
         st.session_state.user_name = remembered_user.split("@")[0].capitalize()
 
-# --- FIREBASE GOOGLE-ONLY AUTHENTICATION SCREEN ---
+# --- FIREBASE GOOGLE SIGN-IN SCREEN ---
 if not st.session_state.authenticated:
     st.markdown("<br><br>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -88,7 +88,7 @@ if not st.session_state.authenticated:
         st.markdown("""
         <div style="background: white; border: 1px solid #E2E8F0; border-radius: 16px; padding: 32px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05); text-align: center;">
             <h2 style="color: #4F46E5; margin-bottom: 4px; font-weight:700;">📄 DocAnalyzer AI</h2>
-            <p style="color: #64748B; font-size: 0.95rem; margin-bottom: 24px;">Sign in with Google to access your private documents & chat history</p>
+            <p style="color: #64748B; font-size: 0.95rem; margin-bottom: 24px;">Sign in with Google to access your documents & chat history</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -106,8 +106,6 @@ if not st.session_state.authenticated:
                         st.session_state.user_email = u_info["email"]
                         st.session_state.user_name = u_info["name"]
                         st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-
-                        # Save to query params so user stays logged in permanently
                         st.query_params["user"] = u_info["email"]
                         st.success(f"Welcome back, {u_info['name']}!")
                         st.rerun()
@@ -120,9 +118,9 @@ if not st.session_state.authenticated:
 
     st.stop()
 
-# --- MAIN DASHBOARD (AUTHENTICATED USERS) ---
+# --- MAIN DASHBOARD ---
 
-# --- LEFT SIDEBAR (NAV, FIREBASE USER PROFILE BADGE, BUCKET FILES & SESSIONS) ---
+# --- LEFT SIDEBAR (NAV & USER BADGE) ---
 with st.sidebar:
     col_icon, col_txt = st.columns([0.25, 0.75])
     with col_icon:
@@ -133,10 +131,10 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Firebase Authenticated User Profile Badge
+    # User Profile Badge
     st.markdown(f"""
     <div style="background:#F1F5F9; border-radius:10px; padding:12px; border:1px solid #CBD5E1;">
-        <p style="margin:0; font-size:0.75rem; color:#64748B; font-weight:600;">FIREBASE GOOGLE USER</p>
+        <p style="margin:0; font-size:0.75rem; color:#64748B; font-weight:600;">LOGGED IN USER</p>
         <p style="margin:2px 0 0 0; font-size:0.88rem; color:#0F172A; font-weight:700; word-break:break-all;">🟢 {st.session_state.user_email}</p>
     </div>
     """, unsafe_allow_html=True)
@@ -158,17 +156,6 @@ with st.sidebar:
         ["💬 Chat", "📥 Upload Document", "📦 My Storage Bucket Files", "🕒 My Saved Chat History"],
         label_visibility="collapsed"
     )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # New Private Chat Session Button
-    if st.button("➕ Start New Private Session", use_container_width=True):
-        st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
-        st.session_state.messages = []
-        st.session_state.current_filename = None
-        st.session_state.active_nav = "💬 Chat"
-        st.success(f"New private session initialized!")
-        st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -198,7 +185,7 @@ with st.sidebar:
                             }, timeout=180)
                             if proc_resp.status_code == 200:
                                 b_type = up_data.get("bucket_info", {}).get("storage_type", "Storage Bucket")
-                                st.success(f"'{up_data['filename']}' saved in '{b_type}' for User `{st.session_state.user_email}`!")
+                                st.success(f"'{up_data['filename']}' saved and indexed!")
                                 st.session_state.active_nav = "💬 Chat"
                                 st.rerun()
                             else:
@@ -224,15 +211,14 @@ with main_col:
     with h_col2:
         if st.button("🗑️ Clear Chat", key="clear_chat_btn"):
             st.session_state.messages = []
-            st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
             st.rerun()
 
     st.divider()
 
-    # VIEW 1: MAIN CHAT VIEW (Private to Logged-In Firebase User)
+    # VIEW 1: MAIN CHAT VIEW
     if st.session_state.active_nav == "💬 Chat" or st.session_state.active_nav == "📥 Upload Document":
         if st.session_state.current_filename:
-            st.info(f"📁 Active Document: **{st.session_state.current_filename}** | Session ID: `{st.session_state.session_id}`")
+            st.info(f"📁 Active Document: **{st.session_state.current_filename}**")
         else:
             st.warning("⚠️ No document selected. Upload a PDF or select one from 'My Storage Bucket Files'.")
 
@@ -328,10 +314,10 @@ with main_col:
 
         st.markdown("<p class='disclaimer-text'>Answers are generated using AI and may not always be 100% accurate.</p>", unsafe_allow_html=True)
 
-    # VIEW 2: MY STORAGE BUCKET FILES (Filtered by Firebase user_email)
+    # VIEW 2: MY STORAGE BUCKET FILES
     elif st.session_state.active_nav == "📦 My Storage Bucket Files":
         st.subheader("📦 My Uploaded Documents")
-        st.caption(f"Showing documents uploaded exclusively by User `{st.session_state.user_email}`")
+        st.caption(f"Showing documents uploaded by User `{st.session_state.user_email}`")
 
         try:
             b_resp = requests.get(f"{BACKEND_URL}/api/bucket/files?user_id={st.session_state.user_email}", timeout=10)
@@ -347,9 +333,9 @@ with main_col:
                         <div class="doc-item-card">
                             <div>
                                 <p class="doc-item-title">📄 {f['filename']}</p>
-                                <p class="doc-item-meta">{size_mb} MB • Owner: {f.get('user_id', 'Private')}</p>
+                                <p class="doc-item-meta">{size_mb} MB • Owner: {f.get('user_id', 'User')}</p>
                             </div>
-                            <span class="status-badge-green">🔒 Private File</span>
+                            <span class="status-badge-green">✔ Active</span>
                         </div>
                         """, unsafe_allow_html=True)
 
@@ -379,25 +365,25 @@ with main_col:
         except Exception as e:
             st.error(f"Error reading Storage Bucket: {e}")
 
-    # VIEW 3: MY SAVED CHAT HISTORY (Filtered by Firebase user_email)
+    # VIEW 3: MY SAVED CHAT HISTORY
     elif st.session_state.active_nav == "🕒 My Saved Chat History":
-        st.subheader("🕒 My Saved Chat Sessions")
-        st.caption(f"Showing chat sessions created exclusively by User `{st.session_state.user_email}`")
+        st.subheader("🕒 My Saved Chat History")
+        st.caption(f"Showing chat history for User `{st.session_state.user_email}`")
 
         try:
             resp = requests.get(f"{BACKEND_URL}/api/sessions?user_id={st.session_state.user_email}", timeout=10)
             if resp.status_code == 200:
                 sessions = resp.json()
                 if sessions:
-                    st.caption(f"Total Private Sessions: `{len(sessions)}`")
+                    st.caption(f"Total Saved Conversations: `{len(sessions)}`")
                     for s in sessions:
-                        with st.expander(f"💬 Session `{s['session_id']}` | Document: {s['filename']} | {s['message_count']} msgs"):
+                        with st.expander(f"💬 Conversation | Document: {s['filename']} | {s['message_count']} msgs"):
                             st.markdown(f"**Created At:** `{s['created_at']}`")
                             st.markdown(f"**System Prompt:** *{s['system_prompt']}*")
 
                             col_a, col_b = st.columns([1, 1])
                             with col_a:
-                                if st.button(f"📥 Restore Session '{s['session_id']}'", key=f"hist_load_{s['session_id']}"):
+                                if st.button(f"📥 Restore Conversation", key=f"hist_load_{s['session_id']}"):
                                     sess_resp = requests.get(f"{BACKEND_URL}/api/sessions/{s['session_id']}", timeout=10)
                                     if sess_resp.status_code == 200:
                                         sess_data = sess_resp.json()
@@ -413,17 +399,17 @@ with main_col:
                                             for m in sess_data["messages"]
                                         ]
                                         st.session_state.active_nav = "💬 Chat"
-                                        st.success("Private session restored!")
+                                        st.success("Conversation restored!")
                                         st.rerun()
                             with col_b:
-                                if st.button(f"🗑️ Delete Session", key=f"hist_del_{s['session_id']}"):
+                                if st.button(f"🗑️ Delete History", key=f"hist_del_{s['session_id']}"):
                                     requests.delete(f"{BACKEND_URL}/api/sessions/{s['session_id']}", timeout=10)
-                                    st.success("Session deleted.")
+                                    st.success("Conversation deleted.")
                                     st.rerun()
                 else:
-                    st.info("No saved private chat sessions found.")
+                    st.info("No saved chat history found.")
         except Exception as e:
-            st.error(f"Failed to fetch session history: {e}")
+            st.error(f"Failed to fetch chat history: {e}")
 
 # --- RIGHT COLUMN: CONTROLS & SYSTEM PROMPT ---
 with right_col:
