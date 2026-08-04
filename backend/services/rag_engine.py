@@ -672,7 +672,35 @@ class GroundedCitationVerifier:
                     continue
 
                 overlap_score = len(match_words & line_words) / max(1, len(match_words)) if match_words else 1.0
-                extracted_items.append((page_num, cid, s_clean, overlap_score))
+                
+                # Apply intent-specific scoring bonuses to differentiate definitions, objectives, and mechanisms
+                intent_bonus = 0.0
+                s_lower = s_clean.lower()
+                
+                if intent == "definition":
+                    def_keywords = ["defined as", "refers to", "definition", "means", "is a", "is the", "constitutes", "stands for", "is used to", "changes the", "characterized by"]
+                    if any(k in s_lower for k in def_keywords):
+                        intent_bonus += 0.35
+                    words_list = s_lower.split()
+                    if words_list and words_list[0] in match_words:
+                        intent_bonus += 0.15
+                        
+                elif intent == "objectives":
+                    obj_keywords = ["objective", "purpose", "aim", "goal", "to increase", "to control", "to minimize", "to maintain", "target", "intended to", "applied to"]
+                    if any(k in s_lower for k in obj_keywords):
+                        intent_bonus += 0.35
+                    if any(k in s_lower for k in ["defined as", "refers to"]):
+                        intent_bonus -= 0.20
+                        
+                elif intent in ["mechanism", "explanation"]:
+                    mech_keywords = ["how", "process", "mechanism", "operation", "function", "works", "by", "through", "utilizes", "operates", "results in", "consequently"]
+                    if any(k in s_lower for k in mech_keywords):
+                        intent_bonus += 0.35
+                    if any(k in s_lower for k in ["defined as", "refers to"]):
+                        intent_bonus -= 0.20
+                
+                final_score = overlap_score + intent_bonus
+                extracted_items.append((page_num, cid, s_clean, final_score))
 
         # Sort extracted items: chronologically for summary/overview, otherwise by overlap score descending
         if intent in ["summary", "overview", "page_lookup", "chapter_lookup"]:
