@@ -20,6 +20,10 @@ class HistoryStore:
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            pass
         return conn
 
     def _init_db(self):
@@ -53,6 +57,14 @@ class HistoryStore:
                     is_untrusted_assistant INTEGER DEFAULT 0,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (session_id) REFERENCES sessions (session_id) ON DELETE CASCADE
+                );
+                """)
+
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS file_ownership (
+                    filename TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """)
                 conn.commit()
@@ -192,9 +204,56 @@ class HistoryStore:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
                 cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
                 conn.commit()
                 return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Error deleting session '{session_id}': {e}")
             return False
+
+    def save_file_ownership(self, filename: str, user_id: str) -> None:
+        clean_user_id = user_id.strip().lower() if user_id and user_id.strip() else "anonymous_user"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                INSERT OR REPLACE INTO file_ownership (filename, user_id)
+                VALUES (?, ?)
+                """, (filename, clean_user_id))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving file ownership for {filename}: {e}")
+
+    def get_file_owner(self, filename: str) -> str:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT user_id FROM file_ownership WHERE filename = ?", (filename,))
+                row = cursor.fetchone()
+                if row:
+                    return row["user_id"]
+        except Exception as e:
+            logger.error(f"Error getting file owner for {filename}: {e}")
+        return "anonymous_user"
+
+    def delete_file_ownership(self, filename: str) -> bool:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM file_ownership WHERE filename = ?", (filename,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error deleting file ownership for {filename}: {e}")
+            return False
+
+    def list_all_file_ownerships(self) -> Dict[str, str]:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT filename, user_id FROM file_ownership")
+                return {row["filename"]: row["user_id"] for row in cursor.fetchall()}
+        except Exception as e:
+            logger.error(f"Error listing all file ownerships: {e}")
+            return {}

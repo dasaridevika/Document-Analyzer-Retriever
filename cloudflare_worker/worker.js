@@ -140,11 +140,11 @@ INTENT MATCHING RULES:
         const messages = [
           {
             role: "system",
-            content: `${systemInstruction}\n\nDOCUMENT CONTEXT:\n${cleanContext}`,
+            content: systemInstruction,
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a clear, natural, detail-specific answer for:\n\n"${userQuestion}"`,
+            content: `You must answer the user question using ONLY the provided verified document context.\n\n<DOCUMENT_CONTEXT>\n${cleanContext}\n</DOCUMENT_CONTEXT>\n\nQuestion: "${userQuestion}"`,
           },
         ];
 

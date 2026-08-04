@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
+    tesseract-ocr \
+    libtesseract-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements & install dependencies

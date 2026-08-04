@@ -304,16 +304,16 @@ class VectorStoreManager:
             rrf = (1.0 / (k_rrf + d_rank)) + (0.5 / (k_rrf + b_rank))
 
             doc_text_lower = sub_docs[loc_idx].lower()
-            intent_bonus = 0.0
-            if intent_type == "definition":
-                if any(w in doc_text_lower for w in ["purpose of", "natural electrical characteristics", "is to change", "refers to", "defined as"]):
-                    intent_bonus += 0.30
-            elif intent_type == "objectives":
-                if any(w in doc_text_lower for w in ["objectives of", "ultimate objective", "minimize line overvoltage", "maintain voltage levels"]):
-                    intent_bonus += 0.30
-            elif intent_type in ["mechanism", "explanation"]:
-                if any(w in doc_text_lower for w in ["segments the transmission line", "midpoint voltage regulation", "two independent parts", "voltage stability"]):
-                    intent_bonus += 0.30
+            
+            # Generalized query overlap density (de-biased)
+            doc_words = set(re.findall(r'\w+', doc_text_lower))
+            query_words = set(re.findall(r'\w+', raw_query.lower())) - {
+                "what", "is", "the", "how", "to", "in", "of", "for", "a", "an", "and", "or", "are", "about", "explain"
+            }
+            overlap = len(query_words & doc_words) / max(1, len(query_words)) if query_words else 0.0
+            
+            # Scale intent bonus proportionally (avoiding raw additions that completely swamp RRF)
+            intent_bonus = overlap * 0.05
 
             final_rerank_score = rrf + intent_bonus
             rrf_scores.append((final_rerank_score, loc_idx, dense_sims[loc_idx]))

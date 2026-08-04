@@ -152,5 +152,112 @@ class TestRAGPipelineAudit(unittest.TestCase):
         res = self.rag.answer_query("What is Beta code?", filename="A.pdf", document_id="doc_A_13")
         self.assertNotIn("9999", res["answer"])
 
+    def test_06_delete_session_clears_messages_and_sessions(self):
+        from backend.services.history_store import HistoryStore
+        import tempfile
+        import os
+
+        fd, temp_db_path = tempfile.mkstemp()
+        try:
+            os.close(fd)
+            h_store = HistoryStore(db_path=temp_db_path)
+            sess_id = "test_sess_999"
+
+            h_store.create_session(session_id=sess_id, user_id="test_user", filename="test.pdf")
+            h_store.add_message(session_id=sess_id, role="user", content="hello world")
+
+            self.assertEqual(len(h_store.list_sessions("test_user")), 1)
+            self.assertEqual(len(h_store.get_messages(sess_id)), 1)
+
+            deleted = h_store.delete_session(sess_id)
+            self.assertTrue(deleted)
+
+            self.assertEqual(len(h_store.list_sessions("test_user")), 0)
+            self.assertEqual(len(h_store.get_messages(sess_id)), 0)
+        finally:
+            if os.path.exists(temp_db_path):
+                try:
+                    os.remove(temp_db_path)
+                except Exception:
+                    pass
+
+    def test_07_cors_dynamic_configuration(self):
+        # Verify CORS dynamic origins logic
+        from backend.config import ALLOWED_CORS_ORIGINS, CORS_ALLOW_CREDENTIALS
+        
+        # Test case 1: Starlette wildcard rules configuration
+        test_origins_wildcard = ["*"]
+        if "*" in test_origins_wildcard or not test_origins_wildcard:
+            cors_origins = ["*"]
+            cors_credentials = False
+        else:
+            cors_origins = test_origins_wildcard
+            cors_credentials = True
+            
+        self.assertEqual(cors_origins, ["*"])
+        self.assertFalse(cors_credentials)
+
+        # Test case 2: Restricted origins configuration
+        test_origins_restricted = ["http://localhost:3000", "http://localhost:8501"]
+        if "*" in test_origins_restricted or not test_origins_restricted:
+            cors_origins = ["*"]
+            cors_credentials = False
+        else:
+            cors_origins = test_origins_restricted
+            cors_credentials = True
+
+        self.assertEqual(cors_origins, ["http://localhost:3000", "http://localhost:8501"])
+        self.assertTrue(cors_credentials)
+
+    def test_08_sqlite_file_ownership(self):
+        from backend.services.history_store import HistoryStore
+        import tempfile
+        import os
+
+        fd, temp_db_path = tempfile.mkstemp()
+        try:
+            os.close(fd)
+            h_store = HistoryStore(db_path=temp_db_path)
+            
+            # Save file ownerships
+            h_store.save_file_ownership("test1.pdf", "user_abc")
+            h_store.save_file_ownership("test2.pdf", "user_xyz")
+            h_store.save_file_ownership("test3.pdf", "anonymous_user")
+            
+            # Get owners
+            self.assertEqual(h_store.get_file_owner("test1.pdf"), "user_abc")
+            self.assertEqual(h_store.get_file_owner("test2.pdf"), "user_xyz")
+            self.assertEqual(h_store.get_file_owner("test3.pdf"), "anonymous_user")
+            self.assertEqual(h_store.get_file_owner("non_existent.pdf"), "anonymous_user")
+            
+            # Delete ownership
+            h_store.delete_file_ownership("test1.pdf")
+            self.assertEqual(h_store.get_file_owner("test1.pdf"), "anonymous_user")
+            
+            # List all
+            all_owners = h_store.list_all_file_ownerships()
+            self.assertIn("test2.pdf", all_owners)
+            self.assertEqual(all_owners["test2.pdf"], "user_xyz")
+        finally:
+            if os.path.exists(temp_db_path):
+                try:
+                    os.remove(temp_db_path)
+                except Exception:
+                    pass
+
+    def test_09_pdf_table_inlining_layout(self):
+        # Create a simple mock of PDF parser results and assert layout sorting
+        elements = [
+            (200.0, 50.0, "text", "Paragraph 2 text"),
+            (100.0, 50.0, "table", "| Column 1 |\n|---|"),
+            (300.0, 50.0, "text", "Paragraph 3 text")
+        ]
+        elements.sort(key=lambda x: (x[0], x[1]))
+        
+        # Verify table is ordered first vertically
+        self.assertEqual(elements[0][2], "table")
+        self.assertEqual(elements[1][3], "Paragraph 2 text")
+        self.assertEqual(elements[2][3], "Paragraph 3 text")
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,12 +2,23 @@ import requests
 import logging
 import math
 import hashlib
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from pathlib import Path
 from backend.config import (
     CLOUDFLARE_ACCOUNT_ID,
     CLOUDFLARE_API_TOKEN,
-    CLOUDFLARE_EMBEDDING_MODEL
+    CLOUDFLARE_EMBEDDING_MODEL,
+    DATA_DIR
 )
+
+# Optional imports for local ONNX sentence transformer fallback
+try:
+    import onnxruntime as ort
+    from tokenizers import Tokenizer
+    import numpy as np
+    HAS_ONNX = True
+except ImportError:
+    HAS_ONNX = False
 from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
 logger = logging.getLogger(__name__)
@@ -31,6 +42,12 @@ class EmbeddingService:
             f"{base}/embed",
             base
         ]
+        self.local_onnx_model = None
+        if HAS_ONNX:
+            try:
+                self.local_onnx_model = ONNXEmbeddingModel()
+            except Exception as e:
+                logger.warning(f"Could not instantiate local ONNX embedding model: {e}")
 
     def validate_vectors(self, vectors: List[List[float]]) -> List[List[float]]:
         """
@@ -78,7 +95,16 @@ class EmbeddingService:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API embedding failed: {type(e).__name__}")
 
-        # Priority 3: Guaranteed 1024-dim Deterministic Hashing Fallback
+        # Priority 3: Local ONNX Transformer Fallback (all-MiniLM-L6-v2)
+        if HAS_ONNX and self.local_onnx_model:
+            try:
+                logger.info("Using local ONNX transformer (all-MiniLM-L6-v2) fallback model...")
+                local_vecs = self.local_onnx_model.encode(texts)
+                return self.validate_vectors(local_vecs)
+            except Exception as e:
+                logger.warning(f"Local ONNX embedding generation failed: {e}. Falling back to n-gram hashing.")
+
+        # Priority 4: Guaranteed 1024-dim Deterministic Hashing Fallback
         logger.info("Using 1024-dimension Feature Hashing vector fallback...")
         fallback_vecs = [self._hash_embedding(t, dim=self.expected_dim) for t in texts]
         return self.validate_vectors(fallback_vecs)
@@ -143,3 +169,87 @@ class EmbeddingService:
             vector = [round(x / norm, 5) for x in vector]
 
         return vector
+
+
+class ONNXEmbeddingModel:
+    """
+    Lightweight local embedding generator using ONNX runtime and Xenova/all-MiniLM-L6-v2.
+    Pads the output to 1024 dimensions to match the BGE-Large expected vector store constraints.
+    """
+    def __init__(self, cache_dir: Optional[Path] = None):
+        self.cache_dir = cache_dir or (DATA_DIR / "onnx_model")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.model_path = self.cache_dir / "model.onnx"
+        self.tokenizer_path = self.cache_dir / "tokenizer.json"
+        self.ort_session = None
+        self.tokenizer = None
+
+    def _download_files(self):
+        import urllib.request
+        model_url = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
+        tokenizer_url = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+        
+        try:
+            if not self.model_path.exists():
+                logger.info(f"Downloading ONNX model file to {self.model_path}...")
+                urllib.request.urlretrieve(model_url, self.model_path)
+        except Exception as e:
+            logger.error(f"Failed to download ONNX model file: {e}")
+            raise
+
+        try:
+            if not self.tokenizer_path.exists():
+                logger.info(f"Downloading tokenizer configuration to {self.tokenizer_path}...")
+                urllib.request.urlretrieve(tokenizer_url, self.tokenizer_path)
+        except Exception as e:
+            logger.error(f"Failed to download tokenizer configuration: {e}")
+            raise
+
+    def load(self):
+        self._download_files()
+        self.tokenizer = Tokenizer.from_file(str(self.tokenizer_path))
+        self.ort_session = ort.InferenceSession(str(self.model_path))
+
+    def encode(self, texts: List[str]) -> List[List[float]]:
+        if not self.ort_session or not self.tokenizer:
+            self.load()
+
+        embeddings = []
+        for text in texts:
+            encoded = self.tokenizer.encode(text)
+            input_ids = encoded.ids
+            attention_mask = encoded.attention_mask
+
+            in_ids = np.array([input_ids], dtype=np.int64)
+            attn_mask = np.array([attention_mask], dtype=np.int64)
+            
+            model_inputs = {input.name: input for input in self.ort_session.get_inputs()}
+            inputs = {
+                "input_ids": in_ids,
+                "attention_mask": attn_mask
+            }
+            if "token_type_ids" in model_inputs:
+                inputs["token_type_ids"] = np.zeros((1, len(input_ids)), dtype=np.int64)
+
+            outputs = self.ort_session.run(None, inputs)
+            token_embeddings = outputs[0]  # Shape: [1, seq_len, 384]
+
+            # Mean pooling with attention mask
+            mask = np.expand_dims(attn_mask, axis=-1)  # Shape: [1, seq_len, 1]
+            token_embeddings_masked = token_embeddings * mask
+            sum_embeddings = np.sum(token_embeddings_masked, axis=1)
+            sum_mask = np.sum(mask, axis=1)
+            sum_mask = np.maximum(sum_mask, 1e-9)
+            mean_pooled = sum_embeddings / sum_mask
+
+            # L2 Normalize
+            norm = np.linalg.norm(mean_pooled, axis=1, keepdims=True)
+            norm = np.maximum(norm, 1e-9)
+            normalized = mean_pooled / norm
+
+            # Pad 384 dimension to 1024 dimension to match BGE-Large expected vector store constraints
+            vector_384 = normalized[0].tolist()
+            vector_1024 = vector_384 + [0.0] * (1024 - 384)
+            embeddings.append(vector_1024)
+
+        return embeddings

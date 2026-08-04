@@ -75,6 +75,12 @@ CLOUDFLARE_LLM_MODEL = os.getenv("CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3.1-8b-
 BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8001))
 
+# CORS Configurations
+ALLOWED_CORS_ORIGINS = [
+    x.strip() for x in os.getenv("ALLOWED_CORS_ORIGINS", "http://localhost:3000,http://localhost:8501").split(",") if x.strip()
+]
+CORS_ALLOW_CREDENTIALS = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() in ["true", "1", "yes"]
+
 # Production Security & Upload Limits
 MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", 50 * 1024 * 1024))  # 50MB
 MAX_PDF_PAGE_COUNT = int(os.getenv("MAX_PDF_PAGE_COUNT", 200))
@@ -93,7 +99,7 @@ DEFAULT_CHUNK_SIZE_TOKENS = int(os.getenv("DEFAULT_CHUNK_SIZE_TOKENS", "400"))
 DEFAULT_CHUNK_OVERLAP_TOKENS = int(os.getenv("DEFAULT_CHUNK_OVERLAP_TOKENS", "80"))
 
 # Grounding & No-Evidence Fallback
-NO_EVIDENCE_FALLBACK_MESSAGE = "I could not find sufficient information to answer this question in the uploaded document."
+NO_EVIDENCE_FALLBACK_MESSAGE = "I could not find sufficient evidence to answer this question in the uploaded document."
 
 # Immutable System Generation Prompt
 IMMUTABLE_SYSTEM_PROMPT = """You are an exact document-question-answering assistant.

@@ -21,7 +21,9 @@ from backend.config import (
     MAX_UPLOAD_SIZE_BYTES,
     MAX_PDF_PAGE_COUNT,
     ALLOWED_FILE_EXTENSIONS,
-    DEBUG_RAG
+    DEBUG_RAG,
+    ALLOWED_CORS_ORIGINS,
+    CORS_ALLOW_CREDENTIALS
 )
 from backend.services.pdf_parser import PDFParser
 from backend.services.chunker import DocumentChunker
@@ -37,10 +39,18 @@ logger = logging.getLogger("DocAnalyzerBackend")
 
 app = FastAPI(title="DocAnalyzer Enterprise RAG API", version="4.0.0")
 
+# Dynamic CORS configuration
+if "*" in ALLOWED_CORS_ORIGINS or not ALLOWED_CORS_ORIGINS:
+    cors_origins = ["*"]
+    cors_credentials = False
+else:
+    cors_origins = ALLOWED_CORS_ORIGINS
+    cors_credentials = CORS_ALLOW_CREDENTIALS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -133,7 +143,12 @@ async def upload_document(
         content_type="application/pdf"
     )
 
-    parse_result = PDFParser.parse_pdf_bytes(content, safe_name)
+    try:
+        parse_result = PDFParser.parse_pdf_bytes(content, safe_name)
+    except Exception as e:
+        logger.error(f"PDF parsing error during upload for '{safe_name}': {e}")
+        raise HTTPException(status_code=400, detail=f"Corrupted or invalid PDF file: {str(e)}")
+
     report = parse_result["extraction_report"]
 
     if report["total_pages"] > MAX_PDF_PAGE_COUNT:
@@ -162,7 +177,12 @@ def process_document(req: ProcessRequest):
 
     vector_store.clear_document(filename=safe_name, document_id=doc_id)
 
-    parse_result = PDFParser.parse_pdf_bytes(pdf_bytes, safe_name)
+    try:
+        parse_result = PDFParser.parse_pdf_bytes(pdf_bytes, safe_name)
+    except Exception as e:
+        logger.error(f"PDF parsing error during processing for '{safe_name}': {e}")
+        raise HTTPException(status_code=400, detail=f"Corrupted or invalid PDF file: {str(e)}")
+
     pages_data = parse_result["pages"]
 
     if not pages_data:

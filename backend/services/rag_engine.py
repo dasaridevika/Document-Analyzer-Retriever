@@ -146,13 +146,13 @@ class CrossEncoderReranker:
             if intent_type in ["summary", "overview"]:
                 p_num = c.get("metadata", {}).get("page_number", 1)
                 if p_num <= 3:
-                    intent_boost = 0.40
-            elif intent_type == "definition" and any(k in text_lower for k in ["defined as", "refers to", "purpose of", "is to change"]):
-                intent_boost = 0.35
-            elif intent_type == "objectives" and any(k in text_lower for k in ["objective", "aim", "purpose", "to increase", "to maintain"]):
-                intent_boost = 0.35
-            elif intent_type in ["mechanism", "explanation"] and any(k in text_lower for k in ["segments", "midpoint", "voltage regulation", "doubles"]):
-                intent_boost = 0.35
+                    intent_boost = 0.08
+            elif intent_type == "definition" and any(k in text_lower for k in ["defined as", "refers to", "definition", "means"]):
+                intent_boost = 0.05
+            elif intent_type == "objectives" and any(k in text_lower for k in ["objective", "aim", "goal", "purpose"]):
+                intent_boost = 0.05
+            elif intent_type in ["mechanism", "explanation"] and any(k in text_lower for k in ["mechanism", "process", "operation", "function", "how"]):
+                intent_boost = 0.05
 
             final_score = base_score + intent_boost
             c_copy = dict(c)
@@ -502,34 +502,28 @@ class GroundedCitationVerifier:
         return True
 
     @staticmethod
+    def _is_adversarial_text(text: str) -> bool:
+        pattern = r'(ignore\s*previous\s*instructions|instruction\s*override|system\s*prompt|secret\s*key|api_key|api_token)'
+        return bool(re.search(pattern, text, re.IGNORECASE))
+
+    @staticmethod
     def _fallback_universal_extractive(query: str, target_chunks: List[Dict[str, Any]], intent_obj: QueryIntent) -> Tuple[Dict[str, Any], bool, str]:
         lower_q = query.lower()
         intent = intent_obj.intent
 
-        # HVDC Acronym Fallback
-        if "hvdc" in lower_q and intent == "definition":
-            hvdc_def = "**HVDC** stands for **High Voltage Direct Current**, a technology used for bulk electric power transmission."
-            doc_title = target_chunks[0]["metadata"].get("filename", "") if target_chunks else "HVDC Document"
-            page1 = target_chunks[0]["metadata"].get("page_number", 1) if target_chunks else 1
-            cid1 = target_chunks[0]["chunk_id"] if target_chunks else "c0"
-
-            ans = (
-                f"## Answer\n\n**Definition:**\n{hvdc_def}\n\n"
-                f"**Explanation:**\nIn your document (*{doc_title}*), reactive shunt compensation is applied to HVDC & FACTS transmission lines to regulate voltage profiles and increase power transfer capability.\n\n"
-                f"## Evidence\n\n- Page {page1}, chunk {cid1}: “{hvdc_def}”"
-            )
-            return {
-                "answer": ans,
-                "verified_quotes": [hvdc_def],
-                "confidence": 0.95
-            }, True, "HVDC Acronym Fallback"
-
-        q_words = set(re.findall(r'\w+', lower_q)) - {
+        stop_words = {
             "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
             "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
             "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page",
-            "summarise", "summarize", "given", "document", "explain"
+            "summarise", "summarize", "given", "document", "explain", "discussed", "on", "with", "at",
+            "by", "from", "up", "into", "over", "under", "above", "below"
         }
+        generic_nouns = {
+            "project", "budget", "system", "value", "key", "code", "password", "prompt"
+        }
+        q_words = set(re.findall(r'\w+', lower_q)) - stop_words
+        critical_q_words = q_words - generic_nouns
+        match_words = critical_q_words if critical_q_words else q_words
 
         extracted_items = []
         seen_quotes: Set[str] = set()
@@ -548,13 +542,24 @@ class GroundedCitationVerifier:
                 if s_clean in seen_quotes or not GroundedCitationVerifier._is_clean_sentence(s_clean):
                     continue
 
+                if GroundedCitationVerifier._is_adversarial_text(s_clean):
+                    continue
+
                 seen_quotes.add(s_clean)
                 line_words = set(re.findall(r'\w+', s_clean.lower()))
 
-                if q_words and not (q_words & line_words) and intent not in ["summary", "overview", "page_lookup", "chapter_lookup"]:
+                if match_words and not (match_words & line_words) and intent not in ["summary", "overview", "page_lookup", "chapter_lookup"]:
                     continue
 
-                extracted_items.append((page_num, cid, s_clean))
+                overlap_score = len(match_words & line_words) / max(1, len(match_words)) if match_words else 1.0
+                extracted_items.append((page_num, cid, s_clean, overlap_score))
+
+        # Sort extracted items by overlap score descending for non-summary intents
+        if intent not in ["summary", "overview", "page_lookup", "chapter_lookup"]:
+            extracted_items.sort(key=lambda x: x[3], reverse=True)
+
+        # Map back to standard tuple structure (page_num, cid, sentence_text)
+        extracted_items = [(x[0], x[1], x[2]) for x in extracted_items]
 
         md_output_parts = []
         evidence_items = []
@@ -580,13 +585,18 @@ class GroundedCitationVerifier:
             bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
             evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
             if bullets:
-                md_output_parts.append("**Key Objectives:**\n" + "\n".join(bullets))
+                subject_title = intent_obj.primary_subject.title() if intent_obj.primary_subject else ""
+                title_str = f"**Key Objectives of {subject_title}:**" if subject_title else "**Key Objectives:**"
+                md_output_parts.append(title_str + "\n" + "\n".join(bullets))
 
         elif intent in ["mechanism", "explanation"]:
             bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
             evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
             if bullets:
-                md_output_parts.append("**Voltage Stability & Control Mechanism:**\n" + "\n\n".join(bullets))
+                subject_title = intent_obj.primary_subject.title() if (intent_obj and intent_obj.primary_subject) else "Mechanism & Process"
+                if "voltage stability" in subject_title.lower() or "shunt" in subject_title.lower():
+                    subject_title = "Voltage Stability & Control"
+                md_output_parts.append(f"**{subject_title} Mechanism:**\n" + "\n\n".join(bullets))
 
         elif intent == "comparison":
             bullets = [f"• {s}" for p, cid, s in extracted_items[:6]]
@@ -872,7 +882,7 @@ class RAGEngine:
 
     @staticmethod
     def _detect_prompt_injection(query: str) -> bool:
-        pattern = r'(ignore\s*previous\s*instructions|reveal\s*system\s*prompt|show\s*env|api_key|api_token)'
+        pattern = r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)'
         return bool(re.search(pattern, query, re.IGNORECASE))
 
     def _execute_llm_call(
@@ -904,8 +914,15 @@ class RAGEngine:
                 url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.llm_model}"
                 headers = {"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"}
                 messages = [
-                    {"role": "system", "content": f"{combined_system}\n\nEVIDENCE:\n{context}"},
-                    {"role": "user", "content": f"Answer strictly from the evidence above for query: \"{query}\""}
+                    {"role": "system", "content": combined_system},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"You must answer the user question using ONLY the provided verified document context.\n\n"
+                            f"<DOCUMENT_CONTEXT>\n{context}\n</DOCUMENT_CONTEXT>\n\n"
+                            f"Question: {query}"
+                        )
+                    }
                 ]
                 resp = requests.post(url, headers=headers, json={"messages": messages, "temperature": temperature}, timeout=45)
                 if resp.status_code == 200:

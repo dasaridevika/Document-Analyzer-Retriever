@@ -256,7 +256,13 @@ with main_col:
         st.markdown("<p class='doc-header-sub'>Grounded Answers with Verified Source Citations</p>", unsafe_allow_html=True)
     with h_col2:
         if st.button("🗑️ Clear Chat", key="clear_chat_btn"):
+            try:
+                b_url = resolve_working_backend_url()
+                requests.delete(f"{b_url}/api/sessions/{st.session_state.session_id}", timeout=5)
+            except Exception:
+                pass
             st.session_state.messages = []
+            st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
             st.rerun()
 
     st.divider()

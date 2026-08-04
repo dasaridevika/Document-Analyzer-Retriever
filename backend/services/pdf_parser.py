@@ -39,26 +39,50 @@ class PDFParser:
             page_num = page_idx + 1
             page = doc[page_idx]
 
-            # 1. Multi-Column Preserving Text Extraction
-            raw_text = page.get_text("text", sort=True)
+            # 1. Check for Tables and Text Blocks, Sorting and Inlining Tables
+            tables_list = []
+            try:
+                tables = page.find_tables()
+                if tables and tables.tables:
+                    tables_list = tables.tables
+            except Exception as e:
+                logger.debug(f"Table search notice on page {page_num}: {e}")
+
+            blocks = page.get_text("blocks")
+            elements = []
+
+            # Add tables to elements list
+            for t in tables_list:
+                tb_md = t.to_markdown()
+                if tb_md:
+                    elements.append((t.bbox[1], t.bbox[0], "table", tb_md))
+
+            # Add non-table text blocks to elements list
+            for b in blocks:
+                bx0, by0, bx1, by1, b_text, b_no, b_type = b
+                if b_type == 0:  # Text block
+                    if PDFParser._is_inside_table((bx0, by0, bx1, by1), tables_list):
+                        continue
+                    clean_b_text = b_text.strip()
+                    if clean_b_text:
+                        elements.append((by0, bx0, "text", clean_b_text))
+
+            # Sort all elements (tables and text blocks) by y0 (vertical), then x0 (horizontal)
+            elements.sort(key=lambda x: (x[0], x[1]))
+
+            # Assemble page text
+            assembled_parts = []
+            for el in elements:
+                if el[2] == "table":
+                    assembled_parts.append(f"\n\n{el[3]}\n\n")
+                else:
+                    assembled_parts.append(el[3])
+
+            raw_text = "\n".join(assembled_parts)
             clean_text = PDFParser._clean_page_text(raw_text)
             char_count = len(clean_text)
             word_count = len(clean_text.split())
             extraction_method = "pymupdf"
-
-            # 2. PyMuPDF Table Extraction
-            try:
-                tables = page.find_tables()
-                if tables and tables.tables:
-                    table_mds = []
-                    for t in tables.tables:
-                        df_md = t.to_markdown()
-                        if df_md:
-                            table_mds.append(df_md)
-                    if table_mds:
-                        clean_text += "\n\n### Extracted Tables:\n" + "\n\n".join(table_mds)
-            except Exception as e:
-                logger.debug(f"Table extraction notice on page {page_num}: {e}")
 
             # 3. Check for Scanned Page & OCR Fallback
             if char_count < PDFParser.OCR_MIN_CHARS_PER_PAGE:
@@ -143,3 +167,22 @@ class PDFParser:
         text = re.sub(r' +', ' ', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
+
+    @staticmethod
+    def _is_inside_table(block_bbox: tuple, tables: list) -> bool:
+        bx0, by0, bx1, by1 = block_bbox
+        block_area = (bx1 - bx0) * (by1 - by0)
+        if block_area <= 0:
+            return False
+        for t in tables:
+            tx0, ty0, tx1, ty1 = t.bbox
+            # Intersection coordinates
+            ix0 = max(bx0, tx0)
+            iy0 = max(by0, ty0)
+            ix1 = min(bx1, tx1)
+            iy1 = min(by1, ty1)
+            if ix0 < ix1 and iy0 < iy1:
+                intersect_area = (ix1 - ix0) * (iy1 - iy0)
+                if intersect_area / block_area > 0.5:
+                    return True
+        return False

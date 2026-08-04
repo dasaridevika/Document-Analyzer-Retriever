@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from backend.config import DATA_DIR, BACKUP_DATA_DIR, get_clean_env
+from backend.services.history_store import HistoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,10 @@ class StorageBucketManager:
     Railway S3 Storage Bucket Manager with Strict User Privacy Isolation & User Profile Persistence.
     """
 
-    def __init__(self):
+    def __init__(self, history_store: Optional[HistoryStore] = None):
         self.bucket_name = BUCKET_NAME
         self.s3_client = None
-        self.user_file_map = self._load_json(USER_MAP_FILE)
+        self.history_store = history_store or HistoryStore()
         self.user_profiles = self._load_json(USER_PROFILES_FILE)
 
         if ACCESS_KEY_ID and SECRET_ACCESS_KEY:
@@ -162,9 +163,8 @@ class StorageBucketManager:
         with open(b_path, "wb") as f:
             f.write(content)
 
-        # Record user ownership (Case Normalized)
-        self.user_file_map[filename] = clean_user_id
-        self._save_json(self.user_file_map, USER_MAP_FILE)
+        # Record user ownership (Case Normalized) in SQLite DB
+        self.history_store.save_file_ownership(filename, clean_user_id)
 
         return {
             "storage_type": f"S3 Storage Bucket ({self.bucket_name})" if s3_uploaded else "Railway Volume Disk",
@@ -210,16 +210,16 @@ class StorageBucketManager:
                     if fn.startswith("users/"):
                         continue
                     
-                    owner = self.user_file_map.get(fn, "").strip().lower()
-
+                    owner = self.history_store.get_file_owner(fn).strip().lower()
+                    
                     # Fallback S3 Metadata Check
-                    if not owner and self.s3_client:
+                    if (not owner or owner == "anonymous_user") and self.s3_client:
                         try:
                             h_resp = self.s3_client.head_object(Bucket=self.bucket_name, Key=fn)
-                            owner = h_resp.get("Metadata", {}).get("user_id", "").strip().lower()
-                            if owner:
-                                self.user_file_map[fn] = owner
-                                self._save_json(self.user_file_map, USER_MAP_FILE)
+                            s3_owner = h_resp.get("Metadata", {}).get("user_id", "").strip().lower()
+                            if s3_owner:
+                                owner = s3_owner
+                                self.history_store.save_file_ownership(fn, owner)
                         except Exception:
                             pass
 
@@ -239,7 +239,7 @@ class StorageBucketManager:
         for dir_path in [PRIMARY_BUCKET_DIR, BACKUP_BUCKET_DIR]:
             for f in dir_path.glob("*.pdf"):
                 fn = f.name
-                owner = self.user_file_map.get(fn, "").strip().lower()
+                owner = self.history_store.get_file_owner(fn).strip().lower()
                 if (owner == clean_uid or owner == "" or owner == "anonymous_user") and not any(x["filename"] == fn for x in files):
                     stat = f.stat()
                     files.append({
@@ -267,8 +267,6 @@ class StorageBucketManager:
                 f_path.unlink()
                 deleted = True
 
-        if filename in self.user_file_map:
-            del self.user_file_map[filename]
-            self._save_json(self.user_file_map, USER_MAP_FILE)
+        self.history_store.delete_file_ownership(filename)
 
         return deleted
