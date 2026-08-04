@@ -36,9 +36,9 @@ def _extract_text_from_llm_payload(data: Any) -> str:
 class RAGEngine:
     """
     Production-Grade Intent-Driven RAG Engine:
+    - Strict Query Scope Isolation (Answers ONLY what was asked)
     - Acronym & Technical Concept Expansion
     - Noise-Stripped Chunk Verification
-    - Multi-Turn Follow-Up Query Contextualization
     - Natural Language Synthesizer & Page Citation Engine
     """
 
@@ -86,8 +86,8 @@ class RAGEngine:
         lower_q = query.lower()
 
         synonym_map = {
-            "hvdc": ["high voltage direct current", "hvdc transmission", "shunt compensation", "facts", "power transmission"],
-            "facts": ["flexible ac transmission systems", "static shunt compensator", "statcom", "svc"],
+            "hvdc": ["high voltage direct current", "hvdc transmission", "power transmission"],
+            "facts": ["flexible ac transmission systems", "static shunt compensator"],
             "define": ["definition", "concept", "meaning", "what is", "principle", "explanation"],
             "cost": ["price", "pricing", "fee", "rate", "charge", "payment", "amount"],
             "penalty": ["fine", "fee", "charge", "delayed", "late", "rejection", "sanction"],
@@ -165,7 +165,6 @@ class RAGEngine:
         for c in all_retrieved:
             raw_t = c.get("raw_content", c["text"])
             clean_t = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_t).strip()
-            # Ignore empty or header-only noise chunks
             if len(clean_t) > 35:
                 valid_retrieved.append(c)
 
@@ -298,18 +297,18 @@ RULES:
 - Cite page numbers naturally like [Page 1], [Page 2]."""
         else:
             system_instruction = f"""You are a Master AI Document Assistant.
-CRITICAL INSTRUCTION:
-Your goal is to answer the user's question: "{query}" based strictly on the provided DOCUMENT EXCERPTS.
+CRITICAL MANDATE:
+Answer ONLY the specific query asked by the user: "{query}".
 
 RULES:
-1. Extract and explain the COMPLETE answer to "{query}" using clear paragraphs, bold terms, and exact technical explanations.
-2. If acronyms like HVDC are asked, explain High Voltage Direct Current in relation to the document context (e.g. Static Shunt Compensation / FACTS).
-3. Do NOT output raw chunk headers or unparsed text lists.
-4. Cite page numbers naturally like [Page X] for every fact stated."""
+1. Focus SPECIFICALLY and ONLY on answering "{query}".
+2. Do NOT mention, summarize, or bring up unrequested topics present in the document context.
+3. Provide a clear, direct, and complete definition or explanation for "{query}".
+4. Cite page numbers naturally like [Page X]."""
 
         messages = [
-            {"role": "system", "content": f"{system_instruction}\n\nDOCUMENT EXCERPTS:\n{context}"},
-            {"role": "user", "content": f"Based strictly on the DOCUMENT EXCERPTS above, write a detailed, complete answer for:\n\n\"{query}\""}
+            {"role": "system", "content": f"{system_instruction}\n\nDOCUMENT CONTEXT:\n{context}"},
+            {"role": "user", "content": f"Based strictly on the DOCUMENT CONTEXT above, write a direct, highly accurate answer focusing ONLY on:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -349,7 +348,7 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: Conversational Full-Paragraph Content Synthesizer Fallback with Noise Filtering
+        # Priority 3: Strict Query-Isolated Content Synthesizer Fallback
         top_chunks = retrieved_chunks[:3]
         response_sections = []
 
@@ -376,11 +375,6 @@ RULES:
         if response_sections:
             if is_broad:
                 return f"### Document Overview & Content Summary\n\n" + "\n\n---\n\n".join(response_sections)
-            
-            prefix = ""
-            if "hvdc" in query.lower():
-                prefix = "### Definition & Overview of HVDC & Shunt Compensation\n\n**HVDC** stands for **High Voltage Direct Current**, an electric power transmission technology used for long-distance, high-efficiency bulk power transfer.\n\nIn your document (**Unit VI: Static Shunt Compensators**), reactive shunt compensation is applied to HVDC & FACTS transmission systems to achieve the following core objectives:\n\n"
-
-            return prefix + "\n\n---\n\n".join(response_sections)
+            return "\n\n---\n\n".join(response_sections)
 
         return f"I analyzed the document for **\"{query}\"**, but could not extract a detailed answer."
