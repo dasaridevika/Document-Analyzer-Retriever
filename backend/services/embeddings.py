@@ -1,4 +1,5 @@
-import requests
+import httpx
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
 import hashlib
@@ -10,6 +11,7 @@ from backend.config import (
     CLOUDFLARE_EMBEDDING_MODEL,
     DATA_DIR
 )
+from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
 # Optional imports for local ONNX sentence transformer fallback
 try:
@@ -19,7 +21,6 @@ try:
     HAS_ONNX = True
 except ImportError:
     HAS_ONNX = False
-from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,9 @@ class EmbeddingService:
     """
     Production-Grade BGE Large Embedding Service (1024-Dimension):
     - Priority 1: Live Cloudflare Worker Embedding Endpoint (@cf/baai/bge-large-en-v1.5)
-    - Priority 2: Direct Cloudflare REST API
-    - Priority 3: 1024-Dimension Feature Hashing Fallback (Guarantees FAISS dimension alignment)
+    - Priority 2: Direct Cloudflare REST API (Parallelized HTTP via ThreadPoolExecutor)
+    - Priority 3: Local ONNX Transformer Fallback (all-MiniLM-L6-v2)
+    - Priority 4: 1024-Dimension Feature Hashing Fallback (Guarantees FAISS dimension alignment)
     """
 
     def __init__(self):
@@ -70,32 +72,29 @@ class EmbeddingService:
         # Priority 1: Cloudflare Worker Endpoint
         for w_url in self.worker_urls:
             try:
-                response = requests.post(w_url, json={"text": texts}, timeout=30)
-                if response.status_code == 200:
-                    data = response.json()
-                    vectors = data.get("data") or data.get("result", {}).get("data")
-                    if isinstance(vectors, list) and len(vectors) == len(texts):
-                        logger.info(f"Successfully generated {len(vectors)} embeddings via Cloudflare Worker.")
-                        return self.validate_vectors(vectors)
-                elif response.status_code in [401, 403]:
-                    logger.warning(f"Cloudflare Worker embedding endpoint returned auth error HTTP {response.status_code}.")
-                elif response.status_code == 429:
-                    logger.warning("Cloudflare Worker embedding endpoint rate-limited (HTTP 429).")
-                else:
-                    logger.warning(f"Cloudflare Worker '{w_url}' returned HTTP {response.status_code}: {response.text}")
-            except requests.Timeout:
-                logger.warning(f"Cloudflare Worker embedding call to '{w_url}' timed out.")
+                with httpx.Client(timeout=30.0) as client:
+                    response = client.post(w_url, json={"text": texts})
+                    if response.status_code == 200:
+                        data = response.json()
+                        vectors = data.get("data") or data.get("result", {}).get("data")
+                        if isinstance(vectors, list) and len(vectors) == len(texts):
+                            logger.info(f"Successfully generated {len(vectors)} embeddings via Cloudflare Worker.")
+                            return self.validate_vectors(vectors)
+                    elif response.status_code in [401, 403]:
+                        logger.warning(f"Cloudflare Worker embedding endpoint returned auth error HTTP {response.status_code}.")
+                    elif response.status_code == 429:
+                        logger.warning("Cloudflare Worker embedding endpoint rate-limited (HTTP 429).")
+                    else:
+                        logger.warning(f"Cloudflare Worker '{w_url}' returned HTTP {response.status_code}: {response.text}")
             except Exception as e:
                 logger.warning(f"Cloudflare Worker embedding call failed on '{w_url}': {e}")
 
-        # Priority 2: Direct Cloudflare REST API
+        # Priority 2: Direct Cloudflare REST API (Parallelized HTTP via ThreadPoolExecutor)
         if self.account_id and self.api_token and "placeholder" not in str(self.account_id).lower():
             try:
                 vectors = self._generate_cloudflare_rest_embeddings(texts)
                 logger.info(f"Successfully generated {len(vectors)} embeddings via Direct Cloudflare REST API.")
                 return self.validate_vectors(vectors)
-            except requests.Timeout:
-                logger.warning("Direct Cloudflare REST API embedding call timed out.")
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API embedding failed: {e}")
         else:
@@ -124,28 +123,35 @@ class EmbeddingService:
 
         all_embeddings = []
         batch_size = 32
+        batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
 
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            payload = {"text": batch}
+        def fetch_batch(batch_texts):
+            with httpx.Client(timeout=30.0) as client:
+                payload = {"text": batch_texts}
+                response = client.post(url, headers=headers, json=payload)
+                if response.status_code == 401:
+                    raise PermissionError("Cloudflare REST API 401 Unauthorized: Invalid API Token.")
+                if response.status_code == 404:
+                    raise ValueError(f"Cloudflare REST API 404 Not Found: Account ID or Model invalid.")
+                if response.status_code == 429:
+                    raise RuntimeError("Cloudflare REST API 429 Rate Limit Exceeded.")
+                if response.status_code != 200:
+                    raise RuntimeError(f"Cloudflare REST API HTTP {response.status_code}: {response.text}")
 
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            if response.status_code == 401:
-                raise PermissionError("Cloudflare REST API 401 Unauthorized: Invalid API Token.")
-            if response.status_code == 404:
-                raise ValueError(f"Cloudflare REST API 404 Not Found: Account ID '{self.account_id}' or Model '{self.model_name}' invalid.")
-            if response.status_code == 429:
-                raise RuntimeError("Cloudflare REST API 429 Rate Limit Exceeded.")
-            if response.status_code != 200:
-                raise RuntimeError(f"Cloudflare REST API HTTP {response.status_code}: {response.text}")
+                data = response.json()
+                if not data.get("success", False):
+                    raise RuntimeError(f"Cloudflare REST API returned unsuccessful status: {data.get('errors')}")
 
-            data = response.json()
-            if not data.get("success", False):
-                raise RuntimeError(f"Cloudflare REST API returned unsuccessful status: {data.get('errors')}")
+                result = data.get("result", {})
+                return result.get("data", [])
 
-            result = data.get("result", {})
-            vectors = result.get("data", [])
-            all_embeddings.extend(vectors)
+        # Run batches in parallel using ThreadPoolExecutor
+        max_workers = min(8, len(batches))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(fetch_batch, batches))
+
+        for r in results:
+            all_embeddings.extend(r)
 
         return all_embeddings
 

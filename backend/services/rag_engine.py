@@ -686,7 +686,7 @@ class RAGEngine:
         )
 
         # Stage 1: Prompt Injection Guard
-        if self._detect_prompt_injection(clean_query):
+        if self._detect_prompt_injection(clean_query) or (system_prompt and self._detect_prompt_injection(system_prompt)):
             trace.failure_stage = "prompt_injection"
             trace.failure_reason = "Adversarial prompt injection attempt detected."
             return {
@@ -890,7 +890,10 @@ class RAGEngine:
     def _execute_llm_call(
         self, context: str, query: str, system_prompt: Optional[str], temperature: float = 0.0
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-        combined_system = f"{IMMUTABLE_SYSTEM_PROMPT}\n\nUSER STYLE PROMPT: {system_prompt or ''}"
+        sanitized_style = ""
+        if system_prompt:
+            sanitized_style = re.sub(r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)', '', system_prompt, flags=re.IGNORECASE).strip()
+        combined_system = f"{IMMUTABLE_SYSTEM_PROMPT}\n\nUSER STYLE PROMPT: {sanitized_style}"
 
         # 1. Try Worker AI Base URL
         if self.worker_base_url:

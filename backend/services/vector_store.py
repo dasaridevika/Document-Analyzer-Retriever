@@ -13,49 +13,81 @@ logger = logging.getLogger(__name__)
 FAISS_INDEX_PATH = VECTOR_DB_DIR / "faiss_index.bin"
 FAISS_META_PATH = VECTOR_DB_DIR / "faiss_metadata.json"
 
-class BM25Scorer:
+
+class PersistentBM25Index:
     """
-    Lightweight, fast BM25 Lexical Scorer for hybrid search re-ranking.
+    Persisted BM25 Index containing global document frequency mappings.
+    Replaces query-time index compilation.
     """
-    def __init__(self, corpus: List[str], k1: float = 1.5, b: float = 0.75):
+    def __init__(self, k1: float = 1.5, b: float = 0.75):
         self.k1 = k1
         self.b = b
-        self.corpus = corpus
-        self.doc_len = [len(doc.lower().split()) for doc in corpus]
-        self.avgdl = sum(self.doc_len) / max(1, len(corpus))
-        self.doc_freqs: List[Dict[str, int]] = []
-        self.idf: Dict[str, float] = {}
-        self.N = len(corpus)
-        self._initialize()
+        self.doc_lengths: Dict[str, int] = {}  # chunk_id -> length
+        self.doc_term_freqs: Dict[str, Dict[str, int]] = {}  # chunk_id -> term -> frequency
+        self.global_df: Dict[str, int] = {}  # term -> df
+        self.total_chunks = 0
+        self.avg_doc_len = 0.0
 
-    def _initialize(self):
-        df: Dict[str, int] = {}
-        for doc in self.corpus:
-            frequencies: Dict[str, int] = {}
-            for word in doc.lower().split():
-                frequencies[word] = frequencies.get(word, 0) + 1
-            self.doc_freqs.append(frequencies)
-            for word in frequencies:
-                df[word] = df.get(word, 0) + 1
+    def add_document(self, chunk_id: str, text: str):
+        words = text.lower().split()
+        doc_len = len(words)
+        self.doc_lengths[chunk_id] = doc_len
+        self.total_chunks += 1
+        
+        # Calculate term frequencies
+        tf: Dict[str, int] = {}
+        for word in words:
+            tf[word] = tf.get(word, 0) + 1
+        self.doc_term_freqs[chunk_id] = tf
+        
+        # Update global document frequencies
+        for word in tf.keys():
+            self.global_df[word] = self.global_df.get(word, 0) + 1
+            
+        # Recalculate average length
+        self.avg_doc_len = sum(self.doc_lengths.values()) / max(1, self.total_chunks)
 
-        for word, freq in df.items():
-            self.idf[word] = math.log((self.N - freq + 0.5) / (freq + 0.5) + 1)
-
-    def get_scores(self, query: str) -> np.ndarray:
-        scores = np.zeros(self.N, dtype=np.float32)
+    def score_candidates(self, query: str, candidate_ids: List[str]) -> Dict[str, float]:
         q_words = query.lower().split()
-        for q in q_words:
-            if q not in self.idf:
+        scores: Dict[str, float] = {cid: 0.0 for cid in candidate_ids}
+        
+        for qw in q_words:
+            df = self.global_df.get(qw, 0)
+            if df == 0:
                 continue
-            idf_val = self.idf[q]
-            for i, doc_freq in enumerate(self.doc_freqs):
-                freq = doc_freq.get(q, 0)
-                if freq == 0:
+            # Calculate IDF
+            idf = math.log((self.total_chunks - df + 0.5) / (df + 0.5) + 1.0)
+            
+            for cid in candidate_ids:
+                tf = self.doc_term_freqs.get(cid, {}).get(qw, 0)
+                if tf == 0:
                     continue
-                num = freq * (self.k1 + 1)
-                denom = freq + self.k1 * (1 - self.b + self.b * (self.doc_len[i] / max(1.0, self.avgdl)))
-                scores[i] += idf_val * (num / denom)
+                doc_len = self.doc_lengths.get(cid, 0)
+                num = tf * (self.k1 + 1)
+                denom = tf + self.k1 * (1 - self.b + self.b * (doc_len / max(1.0, self.avg_doc_len)))
+                scores[cid] += idf * (num / denom)
+                
         return scores
+
+    def save_state(self) -> Dict[str, Any]:
+        return {
+            "k1": self.k1,
+            "b": self.b,
+            "doc_lengths": self.doc_lengths,
+            "doc_term_freqs": self.doc_term_freqs,
+            "global_df": self.global_df,
+            "total_chunks": self.total_chunks,
+            "avg_doc_len": self.avg_doc_len
+        }
+
+    def load_state(self, state: Dict[str, Any]):
+        self.k1 = state.get("k1", 1.5)
+        self.b = state.get("b", 0.75)
+        self.doc_lengths = state.get("doc_lengths", {})
+        self.doc_term_freqs = state.get("doc_term_freqs", {})
+        self.global_df = state.get("global_df", {})
+        self.total_chunks = state.get("total_chunks", 0)
+        self.avg_doc_len = state.get("avg_doc_len", 0.0)
 
 
 def _jaccard_similarity(text1: str, text2: str) -> float:
@@ -73,7 +105,7 @@ def maximum_marginal_relevance(
     top_k: int = 8
 ) -> List[int]:
     """
-    Computes Maximum Marginal Relevance (MMR) to balance relevance with diversity (Saraswathi Lakshman Guide).
+    Computes Maximum Marginal Relevance (MMR) to balance relevance with diversity.
     """
     if len(doc_vectors) == 0:
         return []
@@ -122,6 +154,7 @@ class VectorStoreManager:
         self.documents_store: List[str] = []
         self.ids_store: List[str] = []
         self.vector_matrix: Optional[np.ndarray] = None
+        self.bm25_index = PersistentBM25Index()
 
         self._init_faiss_engine()
 
@@ -153,6 +186,16 @@ class VectorStoreManager:
                     stored_vecs = meta_data.get("vectors")
                     if stored_vecs:
                         self.vector_matrix = np.array(stored_vecs, dtype=np.float32)
+
+                    # Load BM25 state
+                    bm25_state = meta_data.get("bm25_index")
+                    if bm25_state:
+                        self.bm25_index.load_state(bm25_state)
+                    else:
+                        # Rebuild if missing
+                        for i, doc in enumerate(self.documents_store):
+                            self.bm25_index.add_document(self.ids_store[i], doc)
+
                 logger.info(f"Loaded existing vector index with {len(self.ids_store)} chunks.")
                 return
             except Exception as e:
@@ -180,7 +223,8 @@ class VectorStoreManager:
                 "ids": self.ids_store,
                 "documents": self.documents_store,
                 "metadatas": self.metadata_store,
-                "vectors": self.vector_matrix.tolist() if self.vector_matrix is not None else []
+                "vectors": self.vector_matrix.tolist() if self.vector_matrix is not None else [],
+                "bm25_index": self.bm25_index.save_state()
             }
             with open(FAISS_META_PATH, "w", encoding="utf-8") as f:
                 json.dump(meta_data, f, indent=2)
@@ -210,6 +254,7 @@ class VectorStoreManager:
         for c in chunks:
             self.ids_store.append(c["chunk_id"])
             self.documents_store.append(c["text"])
+            self.bm25_index.add_document(c["chunk_id"], c["text"])
             self.metadata_store.append({
                 "chunk_id": c["chunk_id"],
                 "chunk_index": int(c["chunk_index"]),
@@ -288,11 +333,12 @@ class VectorStoreManager:
         dense_sims = np.dot(sub_matrix, norm_query.T).flatten()
         dense_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(dense_sims)[::-1])}
 
-        # 2. Lexical BM25 Search
+        # 2. Lexical BM25 Search (Using Persisted Global TF/DF Statistics)
         bm25_rank_map = {}
-        if raw_query.strip() and sub_docs:
-            bm25 = BM25Scorer(sub_docs)
-            bm25_scores = bm25.get_scores(raw_query)
+        if raw_query.strip() and candidate_indices:
+            candidate_ids = [self.ids_store[i] for i in candidate_indices]
+            bm25_scores_dict = self.bm25_index.score_candidates(raw_query, candidate_ids)
+            bm25_scores = np.array([bm25_scores_dict.get(self.ids_store[i], 0.0) for i in candidate_indices], dtype=np.float32)
             bm25_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(bm25_scores)[::-1])}
 
         # 3. Intent-Driven RRF Scoring
@@ -312,7 +358,7 @@ class VectorStoreManager:
             }
             overlap = len(query_words & doc_words) / max(1, len(query_words)) if query_words else 0.0
             
-            # Scale intent bonus proportionally (avoiding raw additions that completely swamp RRF)
+            # Scale intent bonus proportionally
             intent_bonus = overlap * 0.05
 
             final_rerank_score = rrf + intent_bonus
@@ -377,6 +423,11 @@ class VectorStoreManager:
         self.documents_store = [self.documents_store[i] for i in keep_indices]
         self.metadata_store = [self.metadata_store[i] for i in keep_indices]
 
+        # Rebuild BM25 index for remaining documents
+        self.bm25_index = PersistentBM25Index()
+        for i in keep_indices:
+            self.bm25_index.add_document(self.ids_store[i], self.documents_store[i])
+
         if self.vector_matrix is not None and len(keep_indices) > 0:
             self.vector_matrix = self.vector_matrix[keep_indices]
         else:
@@ -393,6 +444,7 @@ class VectorStoreManager:
         self.documents_store = []
         self.metadata_store = []
         self.vector_matrix = None
+        self.bm25_index = PersistentBM25Index()
         if self.faiss_module:
             self.faiss_index = self.faiss_module.IndexFlatIP(self.embedding_dim)
         self._save_persistent_faiss()
