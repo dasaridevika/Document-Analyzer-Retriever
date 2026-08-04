@@ -1057,7 +1057,96 @@ class RAGEngine:
             sanitized_style = re.sub(r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)', '', system_prompt, flags=re.IGNORECASE).strip()
         combined_system = f"{IMMUTABLE_SYSTEM_PROMPT}\n\nUSER STYLE PROMPT: {sanitized_style}"
 
-        # 1. Try Worker AI Base URL
+        # 1. Try Google Gemini API Fallback (First Priority if key is configured)
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if gemini_key and gemini_key.lower() not in ["none", "null", "placeholder"]:
+            try:
+                logger.info("Executing LLM call using Google Gemini API...")
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+                headers = {"Content-Type": "application/json"}
+                prompt_content = f"{combined_system}\n\nDOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {query}\n\nReturn JSON output matching the requested schema."
+                payload = {
+                    "contents": [{
+                        "parts": [{"text": prompt_content}]
+                    }],
+                    "generationConfig": {
+                        "responseMimeType": "application/json"
+                    }
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                if resp.status_code == 200:
+                    resp_json = resp.json()
+                    candidate = resp_json.get("candidates", [{}])[0]
+                    text_out = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
+                    if text_out:
+                        parsed_json = json.loads(text_out)
+                        return text_out, parsed_json
+            except Exception as e:
+                logger.warning(f"Google Gemini API call failed: {e}. Falling back to next provider.")
+
+        # 2. Try OpenAI API Fallback
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if openai_key and openai_key.lower() not in ["none", "null", "placeholder"]:
+            try:
+                logger.info("Executing LLM call using OpenAI API...")
+                url = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json"
+                }
+                messages = [
+                    {"role": "system", "content": combined_system},
+                    {"role": "user", "content": f"<DOCUMENT_CONTEXT>\n{context}\n</DOCUMENT_CONTEXT>\n\nQuestion: {query}"}
+                ]
+                payload = {
+                    "model": os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"),
+                    "messages": messages,
+                    "response_format": {"type": "json_object"},
+                    "temperature": temperature
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                if resp.status_code == 200:
+                    choice = resp.json().get("choices", [{}])[0]
+                    text_out = choice.get("message", {}).get("content", "")
+                    if text_out:
+                        parsed_json = json.loads(text_out)
+                        return text_out, parsed_json
+            except Exception as e:
+                logger.warning(f"OpenAI API call failed: {e}. Falling back to next provider.")
+
+        # 3. Try Anthropic API Fallback
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if anthropic_key and anthropic_key.lower() not in ["none", "null", "placeholder"]:
+            try:
+                logger.info("Executing LLM call using Anthropic API...")
+                url = "https://api.anthropic.com/v1/messages"
+                headers = {
+                    "x-api-key": anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json"
+                }
+                messages = [
+                    {"role": "user", "content": f"<DOCUMENT_CONTEXT>\n{context}\n</DOCUMENT_CONTEXT>\n\nQuestion: {query}"}
+                ]
+                payload = {
+                    "model": os.getenv("ANTHROPIC_LLM_MODEL", "claude-3-5-sonnet-20240620"),
+                    "system": combined_system,
+                    "messages": messages,
+                    "max_tokens": 1500,
+                    "temperature": temperature
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                if resp.status_code == 200:
+                    text_out = resp.json().get("content", [{}])[0].get("text", "")
+                    if text_out:
+                        json_match = re.search(r'\{.*\}', text_out, re.DOTALL)
+                        if json_match:
+                            parsed_json = json.loads(json_match.group(0))
+                            return text_out, parsed_json
+            except Exception as e:
+                logger.warning(f"Anthropic API call failed: {e}. Falling back to next provider.")
+
+        # 4. Try Cloudflare Worker AI Base URL
         if self.worker_base_url:
             try:
                 resp = requests.post(f"{self.worker_base_url}/analyze", json={
@@ -1075,7 +1164,7 @@ class RAGEngine:
             except Exception as e:
                 logger.warning(f"Worker AI call failed: {e}")
 
-        # 2. Try Direct Cloudflare REST API
+        # 5. Try Direct Cloudflare REST API
         if self.account_id and self.api_token and "placeholder" not in self.account_id:
             try:
                 url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.llm_model}"
