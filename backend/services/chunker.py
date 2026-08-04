@@ -15,13 +15,20 @@ def count_tokens(text: str) -> int:
         return len(encoding.encode(text))
     return max(1, len(text) // 4)
 
+def validate_index_coverage(pdf_page_count: int, chunks: List[Dict[str, Any]]) -> List[int]:
+    """
+    Step 3 Requirement: Validates which pages have indexed chunks and returns sorted list of missing page numbers.
+    """
+    indexed_pages = {chunk["page_number"] for chunk in chunks if "page_number" in chunk}
+    missing_pages = set(range(1, pdf_page_count + 1)) - indexed_pages
+    return sorted(missing_pages)
+
+
 class DocumentChunker:
     """
     Production Token-Aware Contextual Chunking Engine.
-    - Token counting via tiktoken
-    - Heading, list, code block, and table structure preservation
-    - Standalone Chunk Metadata Prefixing (Document, Document ID, Page, Section, Chunk ID)
-    - Chunk Deduplication
+    - Preserves extraction_method (pymupdf / ocr) per chunk
+    - Index coverage validation
     """
 
     def create_chunks(
@@ -85,6 +92,8 @@ class DocumentChunker:
         for p in pages_data:
             page_num = p["page_number"]
             text = p["text"]
+            extraction_method = p.get("extraction_method", "pymupdf")
+
             if not text:
                 continue
 
@@ -155,7 +164,7 @@ class DocumentChunker:
                         "text": formatted_chunk_text,
                         "raw_content": sc_clean,
                         "strategy": strategy,
-                        "extraction_method": "PyMuPDF Reading Order",
+                        "extraction_method": extraction_method,
                         "embedding_model": embedding_model,
                         "embedding_dimension": embedding_dim,
                         "created_at": created_timestamp,

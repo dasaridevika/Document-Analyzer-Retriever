@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 import datetime
+import hashlib
 
 # Page Config
 st.set_page_config(
@@ -84,6 +85,8 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "query_cache" not in st.session_state:
+    st.session_state.query_cache = {}
 if "style_prompt" not in st.session_state:
     st.session_state.style_prompt = "Provide clear, professional explanations with concise bullet points."
 if "active_nav" not in st.session_state:
@@ -226,10 +229,15 @@ with st.sidebar:
                             }, timeout=180)
 
                             if proc_resp.status_code == 200:
+                                proc_data = proc_resp.json()
                                 st.session_state.current_filename = fn
                                 st.session_state.current_document_id = doc_id
                                 st.session_state.active_documents = [fn]
-                                st.success(f"Indexed '{fn}'! Quality Score: {report.get('quality_score', 100)}%")
+                                coverage_msg = ""
+                                if proc_data.get("extraction_report", {}).get("missing_unsearchable_pages"):
+                                    missing_p = proc_data["extraction_report"]["missing_unsearchable_pages"]
+                                    coverage_msg = f" (Notice: Missing/unsearchable pages: {missing_p})"
+                                st.success(f"Indexed '{fn}'! Quality Score: {report.get('quality_score', 100)}%{coverage_msg}")
                                 st.session_state.active_nav = "💬 Chat"
                                 st.rerun()
                             else:
@@ -289,7 +297,6 @@ with main_col:
                                 ])
                                 st.markdown(f"<div style='margin-top:10px;'>{sources_html}</div>", unsafe_allow_html=True)
 
-                            # Developer Debug RAG Trace Panel (Only visible when DEBUG_RAG=true)
                             if rag_trace:
                                 with st.expander("🛠️ Developer RAG Debug Trace", expanded=False):
                                     st.json(rag_trace)
@@ -300,43 +307,61 @@ with main_col:
             now_str = datetime.datetime.now().strftime("%I:%M %p")
             st.session_state.messages.append({"role": "user", "content": user_input, "timestamp": now_str})
 
-            try:
-                b_url = resolve_working_backend_url()
-                chat_payload = {
-                    "session_id": st.session_state.session_id,
-                    "document_id": st.session_state.current_document_id,
-                    "user_id": st.session_state.user_email,
-                    "query": user_input,
-                    "filename": st.session_state.current_filename,
-                    "system_prompt": st.session_state.style_prompt,
-                    "top_k": st.session_state.top_k,
-                    "temperature": 0.0
-                }
-                resp = requests.post(f"{b_url}/api/chat", json=chat_payload, timeout=90)
-                if resp.status_code == 200:
-                    data = resp.json()
+            # Unique Request Key & Cache Entry by (document_id, normalized_query)
+            clean_q = user_input.strip().lower()
+            doc_id_key = st.session_state.current_document_id or "default"
+            cache_key = (doc_id_key, clean_q)
+            req_key = hashlib.sha256(f"{doc_id_key}:{st.session_state.session_id}:{clean_q}".encode()).hexdigest()
+
+            if cache_key in st.session_state.query_cache:
+                cached_data = st.session_state.query_cache[cache_key]
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": cached_data["answer"],
+                    "sources": cached_data.get("sources", []),
+                    "verified_quotes": cached_data.get("verified_quotes", []),
+                    "rag_trace": cached_data.get("rag_trace"),
+                    "timestamp": now_str
+                })
+            else:
+                try:
+                    b_url = resolve_working_backend_url()
+                    chat_payload = {
+                        "session_id": st.session_state.session_id,
+                        "document_id": st.session_state.current_document_id,
+                        "user_id": st.session_state.user_email,
+                        "query": user_input,
+                        "filename": st.session_state.current_filename,
+                        "system_prompt": st.session_state.style_prompt,
+                        "top_k": st.session_state.top_k,
+                        "temperature": 0.0
+                    }
+                    resp = requests.post(f"{b_url}/api/chat", json=chat_payload, timeout=90)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        st.session_state.query_cache[cache_key] = data
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": data["answer"],
+                            "sources": data.get("sources", []),
+                            "verified_quotes": data.get("verified_quotes", []),
+                            "rag_trace": data.get("rag_trace"),
+                            "timestamp": datetime.datetime.now().strftime("%I:%M %p")
+                        })
+                    else:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Error: {resp.text}",
+                            "sources": [],
+                            "timestamp": datetime.datetime.now().strftime("%I:%M %p")
+                        })
+                except Exception as e:
                     st.session_state.messages.append({
                         "role": "assistant",
-                        "content": data["answer"],
-                        "sources": data.get("sources", []),
-                        "verified_quotes": data.get("verified_quotes", []),
-                        "rag_trace": data.get("rag_trace"),
-                        "timestamp": datetime.datetime.now().strftime("%I:%M %p")
-                    })
-                else:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": f"Error: {resp.text}",
+                        "content": f"Connection error: {e}",
                         "sources": [],
                         "timestamp": datetime.datetime.now().strftime("%I:%M %p")
                     })
-            except Exception as e:
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": f"Connection error: {e}",
-                    "sources": [],
-                    "timestamp": datetime.datetime.now().strftime("%I:%M %p")
-                })
 
             st.rerun()
 

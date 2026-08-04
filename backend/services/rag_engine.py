@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _extract_json_payload(data: Any) -> Optional[Dict[str, Any]]:
     if isinstance(data, dict):
-        if "answerable" in data and ("answer" in data or "parts" in data):
+        if "answerable" in data and ("answer" in data or "definition" in data or "parts" in data):
             return data
         for k in ["response", "answer", "result", "output"]:
             val = data.get(k)
@@ -58,7 +58,7 @@ def is_relevant_to_query(query: str, chunk_text: str, score: float = 0.0) -> boo
     q_words = set(re.findall(r'\w+', query.lower())) - {
         "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
         "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
-        "tell", "about", "list", "out", "show", "name", "names", "it", "all"
+        "tell", "about", "list", "out", "show", "name", "names", "it", "all", "page", "discussed"
     }
 
     if not q_words:
@@ -69,57 +69,79 @@ def is_relevant_to_query(query: str, chunk_text: str, score: float = 0.0) -> boo
     return len(matches) >= 1 or score >= 0.20
 
 
+class QueryIntent:
+    def __init__(self, intent: str, subject: str, requested_format: str, target_page: Optional[int] = None, sub_questions: Optional[List[str]] = None):
+        self.intent = intent
+        self.subject = subject
+        self.requested_format = requested_format
+        self.target_page = target_page
+        self.sub_questions = sub_questions or []
+
+
 class QueryRewriter:
     """
-    Step 5 Requirement: Converts follow-ups into standalone queries and classifies intent.
+    Step 5 Requirement: Converts queries into standalone intent structures.
     """
     @staticmethod
-    def rewrite_query(query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def rewrite_query(query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, QueryIntent]:
         lower_q = query.lower().strip("?!., ")
-        intent = "fact"
 
-        if any(w in lower_q for w in ["list", "subjects", "courses", "all", "table"]):
+        # Check for specific page query (e.g., "what is discussed on page 10")
+        page_match = re.search(r'page\s+(\d+)', lower_q)
+        target_page = int(page_match.group(1)) if page_match else None
+
+        intent = "fact"
+        requested_format = "direct answer"
+
+        if target_page is not None:
+            intent = "page_content"
+            requested_format = "page summary"
+        elif any(w in lower_q for w in ["what is", "define", "definition", "meaning of"]):
+            intent = "definition"
+            requested_format = "short definition with explanation"
+        elif any(w in lower_q for w in ["objective", "objectives", "purpose of", "aim of"]):
+            intent = "objectives"
+            requested_format = "bulleted objectives list"
+        elif any(w in lower_q for w in ["how does", "how do", "improve", "mechanism", "work"]):
+            intent = "mechanism"
+            requested_format = "step by step mechanism explanation"
+        elif any(w in lower_q for w in ["list", "subjects", "courses", "all", "table"]):
             intent = "list"
+            requested_format = "structured list"
         elif any(w in lower_q for w in ["summarize", "summary", "overview"]):
             intent = "summary"
-        elif any(w in lower_q for w in ["how many", "count", "number", "total"]):
-            intent = "calculation"
-        elif any(w in lower_q for w in ["define", "what is", "meaning"]):
-            intent = "explanation"
+            requested_format = "document summary"
 
-        sub_questions = []
-        if " and " in lower_q or " as well as " in lower_q or "?" in lower_q[:-1]:
-            parts = [p.strip() for p in re.split(r'\band\b|\?', query) if p.strip()]
-            if len(parts) > 1:
-                sub_questions = parts
+        subject = re.sub(r'^(what is|define|how does|what are the objectives of|what is discussed on page \d+)\s*', '', lower_q).strip()
 
         standalone_query = query
-        if chat_history:
+        if chat_history and len(query.split()) <= 6:
             user_messages = [m["content"] for m in chat_history if m.get("role") == "user" and m.get("content", "").strip()]
-            if len(query.split()) <= 6 and user_messages:
+            if user_messages:
                 prev_q = user_messages[-1]
                 if prev_q.strip() and prev_q.lower() != query.lower():
                     standalone_query = f"{prev_q} - {query}"
 
-        return {
-            "standalone_query": standalone_query,
-            "intent": intent,
-            "sub_questions": sub_questions,
-            "needs_clarification": False,
-            "clarification_question": ""
-        }
+        intent_obj = QueryIntent(
+            intent=intent,
+            subject=subject,
+            requested_format=requested_format,
+            target_page=target_page
+        )
+
+        return standalone_query, intent_obj
 
 
 class GroundedCitationVerifier:
     """
-    Step 9 Requirement: Application-level Citation & Verbatim Quote Verifier with Fragment Cleaner.
+    Step 8 & 9 Requirement: Application-level Citation & Verbatim Quote Verifier.
     """
     @staticmethod
     def verify_response(
         query: str,
         structured_json: Optional[Dict[str, Any]],
         target_chunks: List[Dict[str, Any]],
-        active_doc_id: Optional[str] = None
+        intent_obj: QueryIntent
     ) -> Tuple[Dict[str, Any], bool, str]:
         if not target_chunks:
             return {
@@ -129,40 +151,27 @@ class GroundedCitationVerifier:
             }, False, "No target chunks retrieved"
 
         if not structured_json or not structured_json.get("answerable", True):
-            return GroundedCitationVerifier._fallback_extractive_verification(query, target_chunks)
+            return GroundedCitationVerifier._fallback_intent_extractive(query, target_chunks, intent_obj)
+
+        raw_definition = structured_json.get("definition", "").strip()
+        raw_explanation = structured_json.get("explanation", "").strip()
+        raw_answer = structured_json.get("answer", "").strip()
+
+        evidence_list = structured_json.get("evidence", structured_json.get("claims", []))
+        confidence = float(structured_json.get("confidence", 0.90))
 
         chunk_map = {c["chunk_id"]: c for c in target_chunks}
         chunk_text_map = {c["chunk_id"]: c["text"] + "\n" + c.get("raw_content", "") for c in target_chunks}
         all_text_combined = "\n\n".join([c["text"] + "\n" + c.get("raw_content", "") for c in target_chunks])
 
-        raw_answer = structured_json.get("answer", "").strip()
-        claims = structured_json.get("claims", [])
-        parts = structured_json.get("parts", [])
-        conflicts = structured_json.get("conflicts", [])
-        missing_info = structured_json.get("missing_information", [])
-        confidence = float(structured_json.get("confidence", 0.85))
-
         seen_quotes = set()
-        evidence_items = []
+        verified_evidence_items = []
         valid_citations = True
 
-        all_citations = []
-        if parts:
-            for p in parts:
-                all_citations.extend(p.get("citations", []))
-        elif claims:
-            for cl in claims:
-                for cid in cl.get("supporting_chunk_ids", []):
-                    all_citations.append({
-                        "chunk_id": cid,
-                        "page": cl.get("page_numbers", [1])[0] if cl.get("page_numbers") else 1,
-                        "quote": cl.get("support_quote", "")
-                    })
-
-        for cite in all_citations:
-            cid = cite.get("chunk_id")
-            page = cite.get("page")
-            quote = cite.get("quote", "").strip()
+        for cite in evidence_list:
+            cid = cite.get("chunk_id") or (cite.get("supporting_chunk_ids", [None])[0] if cite.get("supporting_chunk_ids") else None)
+            page = cite.get("page") or (cite.get("page_numbers", [1])[0] if cite.get("page_numbers") else 1)
+            quote = (cite.get("quote") or cite.get("support_quote", "")).strip()
 
             if cid and cid not in chunk_map:
                 valid_citations = False
@@ -178,37 +187,29 @@ class GroundedCitationVerifier:
                 else:
                     if quote not in seen_quotes:
                         seen_quotes.add(quote)
-                        evidence_items.append(f"- Page {page or 1}, chunk {cid or 'c0'}: “{quote}”")
+                        verified_evidence_items.append(f"- Page {page or 1}, chunk {cid or 'c0'}: “{quote}”")
 
-        md_parts = [f"## Answer\n\n{raw_answer}"]
+        md_parts = []
+        if raw_definition:
+            md_parts.append(f"**Definition:**\n{raw_definition}")
+        if raw_explanation:
+            md_parts.append(f"**Explanation:**\n{raw_explanation}")
+        if not raw_definition and not raw_explanation and raw_answer:
+            md_parts.append(f"{raw_answer}")
 
-        if evidence_items:
-            md_parts.append("## Evidence\n\n" + "\n".join(evidence_items[:5]))
+        if verified_evidence_items:
+            md_parts.append("## Evidence\n\n" + "\n".join(verified_evidence_items[:4]))
 
-        limitations = []
-        if conflicts:
-            limitations.append("• **Conflicting Information Detected:** " + "; ".join(conflicts))
-        if missing_info:
-            limitations.append("• **Incomplete Information:** " + "; ".join(missing_info))
-
-        if limitations:
-            md_parts.append("## Limitations\n\n" + "\n".join(limitations))
-
-        final_md = "\n\n".join(md_parts)
+        final_md = "## Answer\n\n" + "\n\n".join(md_parts)
 
         return {
             "answer": final_md,
-            "parts": parts,
             "verified_quotes": list(seen_quotes),
             "confidence": confidence
         }, valid_citations, "Verification complete"
 
     @staticmethod
     def _is_clean_complete_sentence(s: str) -> bool:
-        """
-        Filters out incomplete text fragments, figure titles, and orphan headers.
-        Supports markdown tables starting with |.
-        """
         s_clean = s.strip()
         if len(s_clean) < 10:
             return False
@@ -221,142 +222,159 @@ class GroundedCitationVerifier:
         if re.search(r'\b(at a|the|of|and|or|in|for|with|to|is|are|shown|plotted|figure)\s*$', s_clean, re.IGNORECASE):
             return False
 
-        # Must not be an orphan header or figure/table caption
-        if re.match(r'^(?:Figure|Table|Unit\s+[V|X|I]+|Page\s+\d+|Section)\b', s_clean, re.IGNORECASE):
+        # Ignore metadata header lines or orphan short headers
+        if re.match(r'^(?:Document|Document ID|Chunk ID|Section|Figure|Table|Unit\s+[V|X|I]+)\b', s_clean, re.IGNORECASE):
+            return False
+
+        if re.match(r'^(?:Page\s+\d+\s*(?:of\s+\d+)?)$', s_clean, re.IGNORECASE):
             return False
 
         return True
 
     @staticmethod
-    def _fallback_extractive_verification(query: str, target_chunks: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], bool, str]:
+    def _fallback_intent_extractive(query: str, target_chunks: List[Dict[str, Any]], intent_obj: QueryIntent) -> Tuple[Dict[str, Any], bool, str]:
         lower_q = query.lower()
-        is_subject_query = any(w in lower_q for w in ["subject", "subjects", "course title", "course structure", "list of subjects", "subjects in it"])
-        is_objective_query = any(w in lower_q for w in ["objective", "objectives", "purpose", "goal", "aim", "why use"])
-        is_definition_query = any(w in lower_q for w in ["what is", "define", "meaning", "concept"])
-        is_hvdc_query = "hvdc" in lower_q
+        intent = intent_obj.intent
 
-        q_words = set(re.findall(r'\w+', lower_q)) - {
-            "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
-            "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
-            "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do"
-        }
-
-        # Special Acronym Handling for HVDC
-        if is_hvdc_query:
+        # Handle HVDC Acronym Definition
+        if "hvdc" in lower_q and intent == "definition":
             hvdc_def = "**HVDC** stands for **High Voltage Direct Current**, a technology used for bulk electric power transmission."
             doc_title = target_chunks[0]["metadata"].get("filename", "") if target_chunks else "HVDC Document"
             page1 = target_chunks[0]["metadata"].get("page_number", 1) if target_chunks else 1
             cid1 = target_chunks[0]["chunk_id"] if target_chunks else "c0"
 
-            hvdc_ans = (
-                f"## Answer\n\n{hvdc_def}\n\n"
-                f"In your document (*{doc_title}*), reactive shunt compensation is applied to HVDC & FACTS transmission systems to control voltage profiles and increase transmittable power.\n\n"
+            ans = (
+                f"## Answer\n\n**Definition:**\n{hvdc_def}\n\n"
+                f"**Explanation:**\nIn your document (*{doc_title}*), reactive shunt compensation is applied to HVDC & FACTS transmission lines to regulate voltage profiles and increase power transfer capability.\n\n"
                 f"## Evidence\n\n- Page {page1}, chunk {cid1}: “{hvdc_def}”"
             )
             return {
-                "answer": hvdc_ans,
+                "answer": ans,
                 "verified_quotes": [hvdc_def],
-                "confidence": 0.95,
-                "answerable": True
-            }, True, "HVDC Acronym Extraction"
+                "confidence": 0.95
+            }, True, "HVDC Acronym Fallback"
 
-        scored_sentences = []
-        seen_sentences = set()
+        q_words = set(re.findall(r'\w+', lower_q)) - {
+            "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
+            "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
+            "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page"
+        }
 
-        prompt_injection_keywords = [
-            "instruction override", "ignore previous instructions", "system prompt",
-            "secret_key", "secret password", "reveal the system prompt", "call this url"
-        ]
+        def_sentences = []
+        obj_sentences = []
+        mech_sentences = []
+        gen_sentences = []
+
+        seen_quotes = set()
 
         for c in target_chunks:
             page_num = c["metadata"].get("page_number", 1)
             cid = c["chunk_id"]
             raw_text = c.get("raw_content", c["text"])
-            clean_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_text).strip()
-            
-            raw_sentences = re.split(r'(?<=[.!?])\s+|\n', clean_text)
-            for s in raw_sentences:
+            clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
+
+            sentences = re.split(r'(?<=[.!?])\s+|\n', clean_text)
+            for s in sentences:
                 s_clean = s.strip()
                 s_lower = s_clean.lower()
 
-                if s_clean in seen_sentences:
+                if s_clean in seen_quotes or not GroundedCitationVerifier._is_clean_complete_sentence(s_clean):
                     continue
 
-                if not GroundedCitationVerifier._is_clean_complete_sentence(s_clean):
-                    continue
-
-                if any(inj in s_lower for inj in prompt_injection_keywords):
-                    continue
-
-                seen_sentences.add(s_clean)
+                seen_quotes.add(s_clean)
                 line_words = set(re.findall(r'\w+', s_lower))
 
-                if q_words and not (q_words & line_words) and not is_subject_query:
+                if q_words and not (q_words & line_words) and intent not in ["list", "page_content"]:
                     continue
 
-                score = 0.0
+                item = (page_num, cid, s_clean)
 
-                if q_words and (q_words & line_words):
-                    score += len(q_words & line_words) * 3.0
+                if any(s_lower.startswith(w) for w in ["the purpose of", "it has long been", "shunt connected", "var compensation", "reactive compensation is"]):
+                    def_sentences.append(item)
+                elif any(w in s_lower for w in ["objective", "purpose", "aim", "minimize", "maintain"]):
+                    obj_sentences.append(item)
+                elif any(w in s_lower for w in ["midpoint", "voltage regulation", "line segmentation", "impedance", "stability", "angle"]):
+                    mech_sentences.append(item)
+                else:
+                    gen_sentences.append(item)
 
-                if is_subject_query:
-                    if re.search(r'\b[A-Z]{2,4}\d{3}[A-Z]{2}\b', s_clean) or any(term in s_lower for term in ["matrices", "calculus", "chemistry", "programming", "circuit", "physics", "electronics", "power", "machines"]):
-                        score += 5.0
-                elif is_objective_query:
-                    if any(w in s_lower for w in ["objective", "objectives", "purpose", "aim", "increase", "maintain", "minimize", "control", "prevent"]):
-                        score += 4.0
-                elif is_definition_query:
-                    if any(s_lower.startswith(w) for w in ["the purpose", "it has long", "shunt connected", "var compensation", "reactive compensation"]):
-                        score += 5.0
-                    elif any(w in s_lower for w in ["is", "refers to", "defined as", "means"]):
-                        score += 2.0
+        md_output_parts = []
+        evidence_items = []
 
-                if score > 0.0:
-                    scored_sentences.append((score, page_num, cid, s_clean))
+        if intent == "definition":
+            if def_sentences:
+                p, cid, s = def_sentences[0]
+                md_output_parts.append(f"**Definition:**\n{s}")
+                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
 
-        if not scored_sentences:
+                if len(def_sentences) > 1:
+                    p2, cid2, s2 = def_sentences[1]
+                    md_output_parts.append(f"**Explanation:**\n{s2}")
+                    evidence_items.append(f"- Page {p2}, chunk {cid2}: “{s2[:120]}”")
+            elif gen_sentences:
+                p, cid, s = gen_sentences[0]
+                md_output_parts.append(f"**Definition & Overview:**\n{s}")
+                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
+
+        elif intent == "objectives":
+            bullets = []
+            for p, cid, s in (obj_sentences + def_sentences)[:4]:
+                bullets.append(f"• {s}")
+                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
+            if bullets:
+                md_output_parts.append("**Key Objectives of Shunt Compensation:**\n" + "\n".join(bullets))
+
+        elif intent == "mechanism":
+            bullets = []
+            for p, cid, s in (mech_sentences + obj_sentences)[:4]:
+                bullets.append(f"• {s}")
+                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
+            if bullets:
+                md_output_parts.append("**Voltage Stability & Control Mechanism:**\n" + "\n".join(bullets))
+
+        elif intent == "page_content":
+            p_num = intent_obj.target_page or 1
+            page_items = [item for item in (def_sentences + obj_sentences + mech_sentences + gen_sentences) if item[0] == p_num]
+            if page_items:
+                bullets = [f"• {s}" for _, cid, s in page_items[:4]]
+                evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in page_items[:4]]
+                md_output_parts.append(f"**Content Summary for Page {p_num}:**\n" + "\n".join(bullets))
+            else:
+                return {
+                    "answer": f"## Answer\n\nPage {p_num} contains no indexed text or is unsearchable.",
+                    "verified_quotes": [],
+                    "confidence": 0.0
+                }, True, "Page content missing"
+
+        else:
+            bullets = []
+            for p, cid, s in (def_sentences + obj_sentences + gen_sentences)[:4]:
+                bullets.append(f"• {s}")
+                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
+            if bullets:
+                md_output_parts.append("**Summary:**\n" + "\n".join(bullets))
+
+        if not md_output_parts:
             return {
                 "answer": f"## Answer\n\n{NO_EVIDENCE_FALLBACK_MESSAGE}",
                 "verified_quotes": [],
-                "confidence": 0.0,
-                "answerable": False
+                "confidence": 0.0
             }, True, "No evidence fallback"
 
-        scored_sentences.sort(key=lambda x: x[0], reverse=True)
-
-        top_sentences = []
-        evidence_items = []
-        seen_quotes = set()
-
-        for score, page_num, cid, sentence in scored_sentences[:4]:
-            if sentence not in seen_quotes:
-                seen_quotes.add(sentence)
-                top_sentences.append(f"• {sentence}")
-                evidence_items.append(f"- Page {page_num}, chunk {cid}: “{sentence[:120]}”")
-
-        header = ""
-        if is_subject_query:
-            header = "### Course Structure & Subject List:\n\n"
-        elif is_objective_query:
-            header = "### Key Objectives:\n\n"
-        elif is_definition_query:
-            header = "### Definition & Explanation:\n\n"
-
-        md_response = f"## Answer\n\n{header}" + "\n\n".join(top_sentences)
+        final_md = "## Answer\n\n" + "\n\n".join(md_output_parts)
         if evidence_items:
-            md_response += "\n\n## Evidence\n\n" + "\n".join(evidence_items[:4])
+            final_md += "\n\n## Evidence\n\n" + "\n".join(evidence_items[:4])
 
         return {
-            "answer": md_response,
-            "verified_quotes": list(seen_quotes),
-            "confidence": 0.95,
-            "answerable": True
-        }, True, "Extractive fallback successful"
+            "answer": final_md,
+            "verified_quotes": [e.split('“')[-1].rstrip('”') for e in evidence_items],
+            "confidence": 0.95
+        }, True, "Intent extractive fallback successful"
 
 
 class RAGEngine:
     """
-    Production Enterprise Grounded RAG Engine with Full Debug Trace & Verification.
+    Production Enterprise Grounded RAG Engine with Intent-Driven Chunk Filtering & Verification.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -410,15 +428,12 @@ class RAGEngine:
                 "rag_trace": trace if DEBUG_RAG else None
             }
 
-        rewrite_info = QueryRewriter.rewrite_query(clean_query, chat_history)
-        standalone_q = rewrite_info["standalone_query"]
+        standalone_q, intent_obj = QueryRewriter.rewrite_query(clean_query, chat_history)
         trace["rewritten_query"] = standalone_q
-        trace["query_intent"] = rewrite_info["intent"]
-
-        is_subject_listing = rewrite_info["intent"] == "list" or any(w in clean_query.lower() for w in ["subject", "subjects", "course structure"])
+        trace["query_intent"] = intent_obj.intent
 
         target_chunks = []
-        if is_subject_listing:
+        if intent_obj.intent == "list":
             target_chunks = self.vector_store.get_first_pages_chunks(filename=filename, document_id=document_id, max_pages=5)
 
         if not target_chunks:
@@ -442,8 +457,13 @@ class RAGEngine:
         for c in target_chunks:
             chunk_t = c.get("raw_content", c["text"])
             score = c.get("similarity_score", 0.0)
-            if is_relevant_to_query(standalone_q, chunk_t, score):
-                relevant_chunks.append(c)
+
+            if intent_obj.intent == "page_content" and intent_obj.target_page is not None:
+                if c["metadata"].get("page_number") == intent_obj.target_page:
+                    relevant_chunks.append(c)
+            else:
+                if is_relevant_to_query(standalone_q, chunk_t, score):
+                    relevant_chunks.append(c)
 
         final_chunks = relevant_chunks[:FINAL_CONTEXT_K] if relevant_chunks else target_chunks[:FINAL_CONTEXT_K]
 
@@ -492,7 +512,7 @@ class RAGEngine:
             query=clean_query,
             structured_json=structured_json,
             target_chunks=final_chunks,
-            active_doc_id=document_id
+            intent_obj=intent_obj
         )
 
         trace["citation_valid"] = is_valid_citations

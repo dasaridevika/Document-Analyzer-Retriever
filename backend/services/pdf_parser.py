@@ -1,179 +1,145 @@
 import fitz  # PyMuPDF
-import gc
 import re
-from typing import List, Dict, Any, Tuple
 import logging
+import io
+from typing import List, Dict, Any, Optional
+from backend.config import MAX_PDF_PAGE_COUNT
 
 logger = logging.getLogger(__name__)
 
+# Try importing pytesseract / PIL for OCR fallback if installed
+try:
+    import pytesseract
+    from PIL import Image
+    HAS_PYTESSERACT = True
+except ImportError:
+    HAS_PYTESSERACT = False
+
 class PDFParser:
     """
-    Production PDF Parsing Service powered by PyMuPDF (fitz).
-    - Multi-column physical reading order (sort=True)
-    - Table detection and markdown conversion
-    - Repeating header/footer noise stripping
-    - Detailed Extraction Quality Report (detects empty/scanned pages)
+    Production PDF Parser with Multi-Column Reading Order, PyMuPDF Table Extraction,
+    Character Density Analysis, and OCR Fallback for Scanned Pages.
     """
 
-    @staticmethod
-    def _clean_text_noise(text: str) -> str:
-        lines = text.splitlines()
-        clean_lines = []
-        for line in lines:
-            l = line.strip()
-            if not l:
-                continue
-            if re.search(r'(weebly\.com|download now|http[s]?://|www\.|\.org|\.edu)', l, re.IGNORECASE):
-                continue
-            if re.search(r'(collected\s*&\s*prepared\s*by|assoc\.\s*prof|m\.tech|miste|b\.tech,\s*eee|iv\s*year\s*i\s*sem|gcet,\s*kadapa)', l, re.IGNORECASE):
-                continue
-            if re.match(r'^\d{1,3}$', l):
-                continue
-            clean_lines.append(l)
-
-        return "\n".join(clean_lines)
-
-    @staticmethod
-    def _extract_tables_markdown(page) -> Tuple[str, int]:
-        """
-        Extracts structured tables using PyMuPDF find_tables() if available.
-        """
-        table_markdowns = []
-        count = 0
-        try:
-            if hasattr(page, "find_tables"):
-                tabs = page.find_tables()
-                for tab in tabs:
-                    df = tab.extract()
-                    if df and len(df) > 1:
-                        count += 1
-                        header = df[0]
-                        rows = df[1:]
-                        clean_header = [str(c or "").strip().replace("\n", " ") for c in header]
-                        md_lines = ["| " + " | ".join(clean_header) + " |"]
-                        md_lines.append("| " + " | ".join(["---"] * len(clean_header)) + " |")
-                        for r in rows:
-                            clean_r = [str(c or "").strip().replace("\n", " ") for c in r]
-                            md_lines.append("| " + " | ".join(clean_r) + " |")
-                        table_markdowns.append("\n".join(md_lines))
-        except Exception as e:
-            logger.debug(f"Table extraction notice: {e}")
-        
-        return ("\n\n".join(table_markdowns), count)
-
-    @staticmethod
-    def _extract_page_content(page) -> Tuple[str, int, bool]:
-        """
-        Extracts text blocks and tables from a single page.
-        Returns: (cleaned_page_text, table_count, is_scanned_or_empty)
-        """
-        table_md, table_count = PDFParser._extract_tables_markdown(page)
-
-        try:
-            blocks = page.get_text("blocks", sort=True)
-            text_parts = []
-            for b in blocks:
-                if len(b) >= 5 and b[6] == 0:
-                    b_text = b[4].strip()
-                    clean_b = PDFParser._clean_text_noise(b_text)
-                    if clean_b and len(clean_b) > 15:
-                        text_parts.append(clean_b)
-            
-            page_text = "\n\n".join(text_parts)
-        except Exception as e:
-            logger.warning(f"Blocks extraction failed: {e}. Falling back to default text sort.")
-            raw_text = page.get_text("text", sort=True) or ""
-            page_text = PDFParser._clean_text_noise(raw_text)
-
-        if table_md:
-            page_text = (page_text + "\n\n" + table_md).strip()
-
-        is_scanned = (len(page_text.strip()) < 30 and len(page.get_images()) > 0) or (len(page_text.strip()) < 20)
-
-        return (page_text, table_count, is_scanned)
+    OCR_MIN_CHARS_PER_PAGE = 80
+    OCR_DPI = 200
 
     @staticmethod
     def parse_pdf_bytes(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         total_pages = len(doc)
-        pages_data: List[Dict[str, Any]] = []
-        text_chunks_list: List[str] = []
-        total_word_count = 0
-        total_char_count = 0
-        empty_pages = []
-        ocr_needed_pages = []
-        total_tables = 0
+
+        pages_data = []
         warnings = []
+        scanned_pages = []
+        ocr_pages = []
+        searchable_pages_count = 0
 
-        for page_num in range(total_pages):
-            page = doc[page_num]
-            p_num = page_num + 1
-            cleaned_text, table_count, is_scanned = PDFParser._extract_page_content(page)
-            total_tables += table_count
+        for page_idx in range(total_pages):
+            page_num = page_idx + 1
+            page = doc[page_idx]
 
-            if is_scanned:
-                ocr_needed_pages.append(p_num)
-                empty_pages.append(p_num)
+            # 1. Multi-Column Preserving Text Extraction
+            raw_text = page.get_text("text", sort=True)
+            clean_text = PDFParser._clean_page_text(raw_text)
+            char_count = len(clean_text)
+            word_count = len(clean_text.split())
+            extraction_method = "pymupdf"
 
-            if not cleaned_text or len(cleaned_text.strip()) < 20:
-                continue
+            # 2. PyMuPDF Table Extraction
+            try:
+                tables = page.find_tables()
+                if tables and tables.tables:
+                    table_mds = []
+                    for t in tables.tables:
+                        df_md = t.to_markdown()
+                        if df_md:
+                            table_mds.append(df_md)
+                    if table_mds:
+                        clean_text += "\n\n### Extracted Tables:\n" + "\n\n".join(table_mds)
+            except Exception as e:
+                logger.debug(f"Table extraction notice on page {page_num}: {e}")
 
-            word_count = len(cleaned_text.split())
-            char_count = len(cleaned_text)
-            total_word_count += word_count
-            total_char_count += char_count
+            # 3. Check for Scanned Page & OCR Fallback
+            if char_count < PDFParser.OCR_MIN_CHARS_PER_PAGE:
+                scanned_pages.append(page_num)
 
-            pages_data.append({
-                "page_number": p_num,
-                "text": cleaned_text,
-                "word_count": word_count,
-                "char_count": char_count,
-                "tables_count": table_count
-            })
-            text_chunks_list.append(cleaned_text)
+                # Attempt OCR if pytesseract is installed
+                ocr_text = PDFParser._run_ocr_fallback(page)
+                if ocr_text and len(ocr_text.strip()) > char_count:
+                    clean_text = PDFParser._clean_page_text(ocr_text)
+                    char_count = len(clean_text)
+                    word_count = len(clean_text.split())
+                    extraction_method = "ocr"
+                    ocr_pages.append(page_num)
 
-        full_text = "\n\n".join(text_chunks_list)
+            is_searchable = char_count >= 20
 
-        # Extraction Quality Score calculation
-        quality_score = 100.0
-        if total_pages > 0:
-            scanned_ratio = len(ocr_needed_pages) / total_pages
-            quality_score = max(0.0, round(100.0 * (1.0 - scanned_ratio), 1))
+            if is_searchable:
+                searchable_pages_count += 1
+                pages_data.append({
+                    "page_number": page_num,
+                    "text": clean_text,
+                    "extraction_method": extraction_method,
+                    "character_count": char_count,
+                    "word_count": word_count,
+                    "is_searchable": True
+                })
 
-        if ocr_needed_pages:
-            warnings.append(f"Pages {ocr_needed_pages} appear to contain scanned images or minimal text.")
+        doc.close()
 
-        if total_char_count < 100 and total_pages > 0:
-            warnings.append("Document extracted character count is very low. Check if PDF is image-only.")
+        # Generate Warnings & Extraction Report
+        unsearchable = [p for p in range(1, total_pages + 1) if p not in [pd["page_number"] for pd in pages_data]]
+        if unsearchable:
+            if HAS_PYTESSERACT:
+                warnings.append(f"Pages {unsearchable} could not be indexed despite OCR attempt.")
+            else:
+                warnings.append(f"Pages {unsearchable} appear to contain scanned images or minimal text. Please enable OCR or upload a text-searchable PDF.")
+
+        quality_score = round((searchable_pages_count / max(1, total_pages)) * 100, 1)
 
         extraction_report = {
             "total_pages": total_pages,
-            "extracted_char_count": total_char_count,
-            "extracted_word_count": total_word_count,
-            "empty_pages": empty_pages,
-            "ocr_needed_pages": ocr_needed_pages,
-            "tables_detected": total_tables,
+            "searchable_pages": searchable_pages_count,
+            "scanned_pages_detected": scanned_pages,
+            "ocr_pages_processed": ocr_pages,
+            "missing_unsearchable_pages": unsearchable,
             "quality_score": quality_score,
             "extraction_warnings": warnings
         }
 
-        doc_metadata = {
-            "filename": filename,
-            "total_pages": total_pages,
-            "total_words": total_word_count,
-            "total_chars": total_char_count,
-            "format": doc.metadata.get("format", "PDF"),
-            "title": doc.metadata.get("title", filename),
-            "author": doc.metadata.get("author", "Unknown"),
-            "extraction_report": extraction_report
-        }
-
-        doc.close()
-        gc.collect()
-
         return {
-            "metadata": doc_metadata,
+            "filename": filename,
             "pages": pages_data,
-            "full_text": full_text,
             "extraction_report": extraction_report
         }
+
+    @staticmethod
+    def _run_ocr_fallback(page: fitz.Page) -> Optional[str]:
+        """
+        Renders PyMuPDF page to image pixmap and runs pytesseract OCR if available.
+        """
+        if not HAS_PYTESSERACT:
+            return None
+
+        try:
+            pix = page.get_pixmap(dpi=PDFParser.OCR_DPI)
+            img_bytes = pix.tobytes("png")
+            image = Image.open(io.BytesIO(img_bytes))
+            ocr_text = pytesseract.image_to_string(image)
+            return ocr_text
+        except Exception as e:
+            logger.warning(f"PyTesseract OCR failed on page {page.number + 1}: {e}")
+            return None
+
+    @staticmethod
+    def _clean_page_text(text: str) -> str:
+        if not text:
+            return ""
+        # Fix hyphens at end of line
+        text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
+        # Normalize repetitive spaces & control characters
+        text = re.sub(r'[\r\t]', ' ', text)
+        text = re.sub(r' +', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()
