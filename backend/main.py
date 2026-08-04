@@ -151,7 +151,7 @@ async def upload_document(
 
     report = parse_result["extraction_report"]
 
-    if report["total_pages"] > MAX_PDF_PAGE_COUNT:
+    if MAX_PDF_PAGE_COUNT > 0 and report["total_pages"] > MAX_PDF_PAGE_COUNT:
         raise HTTPException(status_code=400, detail=f"PDF page count ({report['total_pages']}) exceeds maximum limit of {MAX_PDF_PAGE_COUNT} pages.")
 
     return {
