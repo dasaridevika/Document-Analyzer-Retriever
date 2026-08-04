@@ -99,22 +99,31 @@ export default {
           .replace(/Visual\s*\[Page\s*\d+\]\s*Visual/gi, "")
           .replace(/^\s*Visual\s*$/gmi, "")
           .replace(/^\s*Page\s*\d+\s*\[Page\s*\d+\]\s*/gmi, "")
+          .replace(/^\[Document:.*?\| Page \d+\]\n/gmi, "")
           .trim();
 
-        const isBroadQuery = body.is_broad || false;
+        const lowerQ = userQuestion.toLowerCase().trim();
+        const isBroadQuery = body.is_broad || [
+          "explain contents", "explain the contents", "explain the pdf", "contents",
+          "summarize", "summary", "overview", "what is in", "tell me about",
+          "full document", "complete details", "describe", "table of contents",
+          "what is it all about", "what is it about", "what is this about", "summarize it"
+        ].some(k => lowerQ.includes(k));
 
         let systemInstruction;
         if (isBroadQuery) {
-          systemInstruction = `You are a Senior Document Analyst.
-The user requested an executive overview of the document: "${userQuestion}".
+          systemInstruction = `You are a Lead AI Document Analyst.
+The user requested a clear summary and natural explanation of the document: "${userQuestion}".
 
-PRODUCE AN EXECUTIVE SUMMARY WITH THESE EXACT SECTIONS:
-1. **Executive Overview & Primary Objective**: Purpose and core topic.
-2. **Key Topics & Modules Covered**: Comprehensive breakdown of key sections.
-3. **Core Technical Specifications & Figures**: Exact values, formulas, and rules.
-4. **Key Takeaways**: Primary conclusions.
+PRODUCE A WELL-WRITTEN EXECUTIVE OVERVIEW WITH THESE SECTIONS:
+1. **Document Purpose & Overview**: Explain the subject of the document clearly in natural paragraphs.
+2. **Key Positions, Figures & Details**: Highlight specific roles, dates, numbers, requirements, or locations mentioned.
+3. **Summary & Key Takeaways**: Provide a concise conclusion.
 
-Cite page numbers like [Page 1], [Page 4]. Write fluent markdown prose.`;
+RULES:
+- Base your response strictly on the DOCUMENT CONTEXT.
+- Write fluent, natural English prose and bullet points. Do NOT print raw chunk tags.
+- Cite page numbers naturally like [Page 1], [Page 2].`;
         } else {
           systemInstruction = `You are a Master AI Document Assistant.
 CRITICAL INSTRUCTION:
@@ -135,7 +144,7 @@ INTENT MATCHING RULES:
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a clear, accurate, detail-specific answer for:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a clear, natural, detail-specific answer for:\n\n"${userQuestion}"`,
           },
         ];
 

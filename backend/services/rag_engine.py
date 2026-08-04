@@ -36,10 +36,9 @@ def _extract_text_from_llm_payload(data: Any) -> str:
 class RAGEngine:
     """
     Production-Grade Intent-Driven RAG Engine:
-    - Intent-based Query Expansion
+    - Broad & Specific Query Intent Classifier
     - Hybrid Search (BGE Dense + BM25 Lexical) via Reciprocal Rank Fusion
-    - Score Thresholding & Context Noise Filtering
-    - Strict Intent Synthesis & Page Citation Formatting
+    - Natural Language Synthesizer & Page Citation Engine
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -51,13 +50,18 @@ class RAGEngine:
         self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
     def _is_broad_query(self, query: str) -> bool:
-        lower_q = query.lower().strip("?!.,")
+        """
+        Detects if the user is asking for a summary, overview, or broad document explanation.
+        """
+        lower_q = query.lower().strip("?!., ")
         broad_phrases = [
-            "summarize the document", "full document summary", "executive summary",
-            "table of contents", "overview of the file", "what is this document about",
-            "complete overview", "summarize entire document"
+            "summarize", "summary", "overview", "what is it all about", "what is it about",
+            "what is this about", "explain this", "tell me about this", "explain the document",
+            "what is this document", "what does this document contain", "table of contents",
+            "full document", "executive summary", "main topics", "key points", "what is this",
+            "tell me about the document", "describe the document", "summarize it"
         ]
-        return any(phrase in lower_q for phrase in broad_phrases)
+        return any(phrase in lower_q for phrase in broad_phrases) or lower_q in ["summarize it", "summarize", "explain", "describe", "overview"]
 
     def _expand_query_intent(self, query: str) -> List[str]:
         expanded = [query]
@@ -100,7 +104,7 @@ class RAGEngine:
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
             doc_name = f"'{filename}'" if filename else "your uploaded documents"
             return {
-                "answer": f"Hello! Ask me any detailed question about {doc_name}, and I will analyze the exact sections to give you an accurate, citation-backed answer.",
+                "answer": f"Hello! Ask me any detailed question about {doc_name}, or ask me to summarize it, and I will analyze the document to give you a clear, comprehensive answer.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -109,7 +113,7 @@ class RAGEngine:
         is_broad = self._is_broad_query(clean_query)
         queries_to_embed = self._expand_query_intent(clean_query)
 
-        # 1. Intent Vector Search across Expanded Queries
+        # 1. Retrieval
         all_retrieved = []
         seen_ids = set()
 
@@ -121,7 +125,7 @@ class RAGEngine:
                     raw_query=clean_query,
                     top_k=top_k,
                     filename_filter=filename,
-                    min_score=0.15
+                    min_score=0.10 if is_broad else 0.15
                 )
                 for c in chunks:
                     cid = c["chunk_id"]
@@ -133,7 +137,7 @@ class RAGEngine:
 
         # 2. Context Selection
         if is_broad:
-            distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=6)
+            distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
             for dc in distributed_chunks:
                 if dc["chunk_id"] not in seen_ids:
                     all_retrieved.append(dc)
@@ -145,11 +149,11 @@ class RAGEngine:
 
         if not target_chunks and filename:
             logger.info("Fallback: Retrieving distributed document chunks...")
-            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=5)
+            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=6)
 
         if not target_chunks:
             return {
-                "answer": "I analyzed the document context, but could not find relevant content matching your query intent.",
+                "answer": "I analyzed the document context, but could not find relevant content matching your query.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
@@ -160,7 +164,8 @@ class RAGEngine:
         for i, chunk in enumerate(target_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"--- [EXCERPT {i+1} | Document: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
+            clean_chunk_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', chunk['text'])
+            context_blocks.append(f"--- [Page {page_num} | Document: {doc_fname}] ---\n{clean_chunk_text}")
         combined_context = "\n\n".join(context_blocks)
 
         # 4. LLM Synthesis
@@ -172,8 +177,6 @@ class RAGEngine:
             retrieved_chunks=target_chunks,
             temperature=temperature
         )
-
-        clean_answer = raw_answer.strip()
 
         sources = [
             {
@@ -187,7 +190,7 @@ class RAGEngine:
         ]
 
         return {
-            "answer": clean_answer,
+            "answer": raw_answer.strip(),
             "sources": sources,
             "system_prompt_used": effective_system_prompt,
             "retrieved_count": len(sources)
@@ -230,19 +233,31 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        system_instruction = f"""You are a Master AI Document Specialist.
+        if is_broad:
+            system_instruction = f"""You are a Lead AI Document Analyst.
+The user wants a clear, fluent summary and explanation of the document: "{query}".
+
+PRODUCE A WELL-WRITTEN, HIGHLY READABLE OVERVIEW WITH THESE SECTIONS:
+1. **Document Subject & Overview**: Explain what this document is about in simple, natural paragraphs.
+2. **Key Positions, Figures & Important Details**: Highlight specific roles, dates, numbers, requirements, or locations mentioned.
+3. **Summary & Key Takeaways**: Provide a concise conclusion.
+
+RULES:
+- Do NOT output raw chunk headers or repetitive brackets. Write fluent, natural English.
+- Cite page numbers naturally like [Page 1], [Page 2]."""
+        else:
+            system_instruction = f"""You are a Master AI Document Assistant.
 CRITICAL INSTRUCTION:
 Your goal is to answer the user's intent: "{query}" based strictly on the provided DOCUMENT EXCERPTS.
 
 RULES:
 1. Understand what the user wants to know and extract ALL exact definitions, numbers, formulas, rules, conditions, and steps matching their query intent.
-2. Structure your answer using clear headers, bold key phrases, and organized bullet points.
-3. Cite page numbers naturally like [Page X] for every fact or figure stated.
-4. If the context does not contain the answer, explicitly state what is missing instead of guessing."""
+2. Explain the answer thoroughly in natural, clear prose using paragraphs, bullet points, and bold text.
+3. Cite page numbers naturally like [Page X] for every fact or figure stated."""
 
         messages = [
             {"role": "system", "content": f"{system_instruction}\n\nDOCUMENT EXCERPTS:\n{context}"},
-            {"role": "user", "content": f"Based strictly on the DOCUMENT EXCERPTS above, synthesize a complete, detail-specific answer answering the user's question:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the DOCUMENT EXCERPTS above, write a natural, comprehensive response answering:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -264,7 +279,7 @@ RULES:
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, is_broad: bool, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
-        # Priority 1: Cloudflare Worker Endpoint
+        # Priority 1: Cloudflare Worker AI Endpoint
         if self.worker_base_url:
             try:
                 ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, is_broad, temperature)
@@ -273,7 +288,7 @@ RULES:
             except Exception as e:
                 logger.warning(f"Cloudflare Worker AI call failed: {e}")
 
-        # Priority 2: Direct REST API
+        # Priority 2: Direct Cloudflare REST API
         if self.account_id and self.api_token:
             try:
                 ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, is_broad, temperature)
@@ -282,42 +297,27 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: Fallback Context Synthesizer (Intent & Keyword Matched Extractor)
-        extracted_lines = []
-        q_words = set(re.findall(r'\w+', query.lower()))
-        synonym_map = {
-            "penalty": ["fine", "fee", "charge", "delayed", "late", "rejection", "sanction"],
-            "late": ["delayed", "overdue", "deadline"],
-            "submission": ["filing", "claim", "submit"]
-        }
-        expanded_words = set(q_words)
-        for k, vals in synonym_map.items():
-            if k in q_words:
-                expanded_words.update(vals)
+        # Priority 3: High-Quality Fallback Natural Language Synthesizer
+        # Cleans raw chunks, removes header junk, and constructs a readable summary
+        pages_seen = set()
+        clean_facts = []
 
-        ignore_words = {"what", "is", "the", "how", "to", "are", "in", "of", "for", "a", "an", "and", "or", "tell", "me", "about"}
-        keywords = expanded_words - ignore_words
-
-        for chunk in retrieved_chunks:
-            page = chunk["metadata"].get("page_number", "?")
-            lines = chunk["text"].splitlines()
-            for line in lines:
-                clean_line = line.strip()
-                if len(clean_line) > 15 and not clean_line.startswith("[Document:"):
-                    line_words = set(re.findall(r'\w+', clean_line.lower()))
-                    if keywords and (keywords & line_words):
-                        extracted_lines.append(f"• {clean_line} [Page {page}]")
-
-        if extracted_lines:
-            return f"### Extracted Information for **\"{query}\"**:\n\n" + "\n".join(extracted_lines[:8])
-
-        default_sentences = []
-        for c in retrieved_chunks[:3]:
-            page = c["metadata"].get("page_number", "?")
+        for c in retrieved_chunks:
+            page = c["metadata"].get("page_number", 1)
+            pages_seen.add(page)
             raw_text = c.get("raw_content", c["text"])
-            snippet = raw_text.replace("\n", " ").strip()
-            if len(snippet) > 150:
-                snippet = snippet[:150] + "..."
-            default_sentences.append(f"• {snippet} [Page {page}]")
+            # Remove metadata header lines
+            lines = [l.strip() for l in raw_text.splitlines() if l.strip() and not l.strip().startswith("[Document:")]
+            
+            for line in lines:
+                if len(line) > 10 and line not in clean_facts:
+                    clean_facts.append(f"{line} [Page {page}]")
 
-        return f"Based on the document sections for **\"{query}\"**:\n\n" + "\n".join(default_sentences)
+        if is_broad or any(w in query.lower() for w in ["summary", "summarize", "about", "overview"]):
+            intro = f"### Document Overview & Summary\n\nThis document covers key details across page(s) {', '.join(str(p) for p in sorted(pages_seen))}. Here is an organized breakdown of the content:\n\n"
+            bullet_points = "\n".join([f"• {fact}" for fact in clean_facts[:10]])
+            return intro + bullet_points
+
+        intro = f"Based on the relevant sections of your document, here are the extracted details answering **\"{query}\"**:\n\n"
+        bullet_points = "\n".join([f"• {fact}" for fact in clean_facts[:8]])
+        return intro + bullet_points
