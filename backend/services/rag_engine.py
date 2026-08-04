@@ -554,8 +554,10 @@ class GroundedCitationVerifier:
                 overlap_score = len(match_words & line_words) / max(1, len(match_words)) if match_words else 1.0
                 extracted_items.append((page_num, cid, s_clean, overlap_score))
 
-        # Sort extracted items by overlap score descending for non-summary intents
-        if intent not in ["summary", "overview", "page_lookup", "chapter_lookup"]:
+        # Sort extracted items: chronologically for summary/overview, otherwise by overlap score descending
+        if intent in ["summary", "overview", "page_lookup", "chapter_lookup"]:
+            extracted_items.sort(key=lambda x: (x[0], x[1]))
+        else:
             extracted_items.sort(key=lambda x: x[3], reverse=True)
 
         # Map back to standard tuple structure (page_num, cid, sentence_text)

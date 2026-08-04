@@ -88,7 +88,7 @@ export default {
         }
 
         const body = await request.json();
-        const userQuestion = (body.query || body.prompt || body.question || body.message || body.text || "Summarize document").trim();
+        const userQuestion = String(body.query || body.prompt || body.question || body.message || (typeof body.text === 'string' ? body.text : "") || "Summarize document").trim();
         
         let rawContext = body.context || body.text || body.document || body.contents || "";
         if (Array.isArray(rawContext)) {

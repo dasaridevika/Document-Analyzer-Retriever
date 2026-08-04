@@ -297,11 +297,13 @@ with main_col:
                         with st.chat_message("assistant", avatar="🤖"):
                             st.markdown(content)
                             if sources:
+                                unique_pages = sorted(list(set(s.get('page_number', 1) for s in sources if s.get('page_number') is not None)))
                                 sources_html = "".join([
-                                    f"""<span class="source-pill">📄 Page {s.get('page_number', 1)}</span> """
-                                    for s in sources[:4]
+                                    f"""<span class="source-pill">📄 Page {p}</span> """
+                                    for p in unique_pages[:6]
                                 ])
-                                st.markdown(f"<div style='margin-top:10px;'>{sources_html}</div>", unsafe_allow_html=True)
+                                if sources_html:
+                                    st.markdown(f"<div style='margin-top:10px;'>{sources_html}</div>", unsafe_allow_html=True)
 
                             if rag_trace:
                                 with st.expander("🛠️ Developer RAG Debug Trace", expanded=False):
