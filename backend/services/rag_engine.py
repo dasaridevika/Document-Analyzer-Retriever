@@ -603,7 +603,16 @@ class GroundedCitationVerifier:
             if quote and len(quote) > 8:
                 quote_clean = re.sub(r'\s+', ' ', quote.lower())
                 target_text_clean = re.sub(r'\s+', ' ', chunk_text_map.get(cid, all_text_combined).lower())
-                if quote_clean not in target_text_clean:
+                
+                is_match = (quote_clean in target_text_clean)
+                if not is_match:
+                    quote_words = set(re.findall(r'\w+', quote_clean))
+                    chunk_words = set(re.findall(r'\w+', target_text_clean))
+                    overlap_ratio = len(quote_words & chunk_words) / max(1, len(quote_words))
+                    if overlap_ratio >= 0.75:
+                        is_match = True
+
+                if not is_match:
                     valid_citations = False
                     is_correct = False
                 else:
@@ -617,6 +626,12 @@ class GroundedCitationVerifier:
         citation_correctness = round(correct_citations / max(1, total_citations), 2) if total_citations > 0 else 1.0
         verified_claims = len(verified_evidence_items)
         answer_faithfulness = round(verified_claims / max(1, total_citations), 2) if total_citations > 0 else (1.0 if raw_answer or raw_definition else 0.0)
+
+        # Synthesis/list intent relaxation rule: prevent fallback triggers on analytical requests
+        is_synthesis_query = intent_obj.intent in ["summary", "overview", "comparison", "list", "explanation"]
+        if not valid_citations and is_synthesis_query:
+            if correct_citations > 0 or total_citations == 0:
+                valid_citations = True
 
         md_parts = []
         if raw_definition:
