@@ -3,11 +3,8 @@ from typing import List, Dict, Any
 
 class DocumentChunker:
     """
-    RAG Document Chunking Engine implementing multiple strategies:
-    - Fixed Size with Overlap
-    - Recursive Character Chunking
-    - Page-Aware Chunking
-    - Semantic Paragraph Chunking
+    RAG Document Chunking Engine implementing sentence-level sliding window overlap
+    and header injection to preserve semantic context across chunk boundaries.
     """
 
     def create_chunks(
@@ -16,7 +13,7 @@ class DocumentChunker:
         filename: str,
         strategy: str = "recursive",
         chunk_size: int = 800,
-        chunk_overlap: int = 100
+        chunk_overlap: int = 150
     ) -> List[Dict[str, Any]]:
         return self.chunk_document(
             pages_data=pages_data,
@@ -32,63 +29,7 @@ class DocumentChunker:
         filename: str,
         strategy: str = "recursive",
         chunk_size: int = 800,
-        chunk_overlap: int = 100
-    ) -> List[Dict[str, Any]]:
-        if strategy == "fixed":
-            return DocumentChunker._fixed_size_chunking(pages_data, filename, chunk_size, chunk_overlap)
-        elif strategy == "page_aware":
-            return DocumentChunker._page_aware_chunking(pages_data, filename, chunk_size)
-        elif strategy == "semantic":
-            return DocumentChunker._semantic_paragraph_chunking(pages_data, filename, chunk_size)
-        else:  # Default: recursive
-            return DocumentChunker._recursive_character_chunking(pages_data, filename, chunk_size, chunk_overlap)
-
-    @staticmethod
-    def _fixed_size_chunking(
-        pages_data: List[Dict[str, Any]],
-        filename: str,
-        chunk_size: int,
-        chunk_overlap: int
-    ) -> List[Dict[str, Any]]:
-        chunks = []
-        full_text_pages = []
-        for p in pages_data:
-            full_text_pages.append((p["page_number"], p["text"]))
-
-        chunk_index = 0
-        for page_num, text in full_text_pages:
-            start = 0
-            text_len = len(text)
-
-            while start < text_len:
-                end = min(start + chunk_size, text_len)
-                chunk_text = text[start:end].strip()
-
-                if chunk_text:
-                    chunks.append({
-                        "chunk_id": f"{filename}_fixed_{chunk_index}",
-                        "chunk_index": chunk_index,
-                        "text": chunk_text,
-                        "filename": filename,
-                        "page_number": page_num,
-                        "strategy": "fixed",
-                        "char_count": len(chunk_text),
-                        "word_count": len(chunk_text.split())
-                    })
-                    chunk_index += 1
-
-                start += (chunk_size - chunk_overlap)
-                if start >= text_len or chunk_size <= chunk_overlap:
-                    break
-
-        return chunks
-
-    @staticmethod
-    def _recursive_character_chunking(
-        pages_data: List[Dict[str, Any]],
-        filename: str,
-        target_size: int = 800,
-        overlap: int = 100
+        chunk_overlap: int = 150
     ) -> List[Dict[str, Any]]:
         chunks = []
         chunk_index = 0
@@ -99,178 +40,81 @@ class DocumentChunker:
             if not text:
                 continue
 
-            paragraphs = re.split(r'\n\n+', text)
-            current_chunk = ""
+            # Split on both double newlines and single line block breaks
+            paragraphs = re.split(r'\n\s*\n', text)
 
             for para in paragraphs:
                 para_clean = para.strip()
                 if not para_clean:
                     continue
 
-                if len(current_chunk) + len(para_clean) + 2 <= target_size:
-                    current_chunk += ("\n\n" + para_clean if current_chunk else para_clean)
+                if len(para_clean) <= chunk_size:
+                    chunk_text = f"[Document: {filename} | Page {page_num}]\n{para_clean}"
+                    chunks.append({
+                        "chunk_id": f"{filename}_chunk_{chunk_index}",
+                        "chunk_index": chunk_index,
+                        "text": chunk_text,
+                        "raw_content": para_clean,
+                        "filename": filename,
+                        "page_number": page_num,
+                        "strategy": strategy,
+                        "char_count": len(chunk_text),
+                        "word_count": len(chunk_text.split())
+                    })
+                    chunk_index += 1
                 else:
-                    if current_chunk:
+                    sub_chunks = DocumentChunker._sub_split_text(para_clean, chunk_size, chunk_overlap)
+                    for sc in sub_chunks:
+                        chunk_text = f"[Document: {filename} | Page {page_num}]\n{sc}"
                         chunks.append({
-                            "chunk_id": f"{filename}_rec_{chunk_index}",
+                            "chunk_id": f"{filename}_chunk_{chunk_index}",
                             "chunk_index": chunk_index,
-                            "text": current_chunk,
+                            "text": chunk_text,
+                            "raw_content": sc,
                             "filename": filename,
                             "page_number": page_num,
-                            "strategy": "recursive",
-                            "char_count": len(current_chunk),
-                            "word_count": len(current_chunk.split())
+                            "strategy": strategy,
+                            "char_count": len(chunk_text),
+                            "word_count": len(chunk_text.split())
                         })
                         chunk_index += 1
-
-                    if len(para_clean) > target_size:
-                        sub_chunks = DocumentChunker._sub_split_text(para_clean, target_size, overlap)
-                        for sc in sub_chunks:
-                            chunks.append({
-                                "chunk_id": f"{filename}_rec_{chunk_index}",
-                                "chunk_index": chunk_index,
-                                "text": sc,
-                                "filename": filename,
-                                "page_number": page_num,
-                                "strategy": "recursive",
-                                "char_count": len(sc),
-                                "word_count": len(sc.split())
-                            })
-                            chunk_index += 1
-                        current_chunk = ""
-                    else:
-                        current_chunk = para_clean
-
-            if current_chunk:
-                chunks.append({
-                    "chunk_id": f"{filename}_rec_{chunk_index}",
-                    "chunk_index": chunk_index,
-                    "text": current_chunk,
-                    "filename": filename,
-                    "page_number": page_num,
-                    "strategy": "recursive",
-                    "char_count": len(current_chunk),
-                    "word_count": len(current_chunk.split())
-                })
-                chunk_index += 1
 
         return chunks
 
     @staticmethod
     def _sub_split_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+        """
+        Splits text into sentences while enforcing sliding window sentence overlap.
+        """
         sentences = re.split(r'(?<=[.!?])\s+', text)
         result = []
-        curr = ""
+        curr_sentences = []
+        curr_len = 0
 
         for s in sentences:
-            if len(curr) + len(s) + 1 <= chunk_size:
-                curr += (" " + s if curr else s)
+            if curr_len + len(s) + 1 <= chunk_size:
+                curr_sentences.append(s)
+                curr_len += len(s) + 1
             else:
-                if curr:
-                    result.append(curr)
-                curr = s
+                if curr_sentences:
+                    result.append(" ".join(curr_sentences))
 
-        if curr:
-            result.append(curr)
+                # Sliding window overlap
+                overlap_sentences = []
+                overlap_len = 0
+                for prev_s in reversed(curr_sentences):
+                    if overlap_len + len(prev_s) + 1 <= overlap:
+                        overlap_sentences.insert(0, prev_s)
+                        overlap_len += len(prev_s) + 1
+                    else:
+                        break
+
+                curr_sentences = overlap_sentences + [s]
+                curr_len = sum(len(x) + 1 for x in curr_sentences)
+
+        if curr_sentences:
+            result.append(" ".join(curr_sentences))
+
         return result
-
-    @staticmethod
-    def _page_aware_chunking(
-        pages_data: List[Dict[str, Any]],
-        filename: str,
-        target_size: int = 800
-    ) -> List[Dict[str, Any]]:
-        chunks = []
-        chunk_index = 0
-
-        for p in pages_data:
-            page_num = p["page_number"]
-            text = p["text"]
-            if not text:
-                continue
-
-            if len(text) <= target_size * 1.5:
-                chunks.append({
-                    "chunk_id": f"{filename}_page_{page_num}_0",
-                    "chunk_index": chunk_index,
-                    "text": text,
-                    "filename": filename,
-                    "page_number": page_num,
-                    "strategy": "page_aware",
-                    "char_count": len(text),
-                    "word_count": len(text.split())
-                })
-                chunk_index += 1
-            else:
-                sub_chunks = DocumentChunker._sub_split_text(text, target_size, 100)
-                for i, sc in enumerate(sub_chunks):
-                    chunks.append({
-                        "chunk_id": f"{filename}_page_{page_num}_{i}",
-                        "chunk_index": chunk_index,
-                        "text": sc,
-                        "filename": filename,
-                        "page_number": page_num,
-                        "strategy": "page_aware",
-                        "char_count": len(sc),
-                        "word_count": len(sc.split())
-                    })
-                    chunk_index += 1
-
-        return chunks
-
-    @staticmethod
-    def _semantic_paragraph_chunking(
-        pages_data: List[Dict[str, Any]],
-        filename: str,
-        max_chunk_size: int = 900
-    ) -> List[Dict[str, Any]]:
-        chunks = []
-        chunk_index = 0
-
-        for p in pages_data:
-            page_num = p["page_number"]
-            text = p["text"]
-            if not text:
-                continue
-
-            paragraphs = re.split(r'\n\n+', text)
-            current_chunk = ""
-
-            for para in paragraphs:
-                para_clean = para.strip()
-                if not para_clean:
-                    continue
-
-                if len(current_chunk) + len(para_clean) + 2 <= max_chunk_size:
-                    current_chunk += ("\n\n" + para_clean if current_chunk else para_clean)
-                else:
-                    if current_chunk:
-                        chunks.append({
-                            "chunk_id": f"{filename}_sem_{chunk_index}",
-                            "chunk_index": chunk_index,
-                            "text": current_chunk,
-                            "filename": filename,
-                            "page_number": page_num,
-                            "strategy": "semantic",
-                            "char_count": len(current_chunk),
-                            "word_count": len(current_chunk.split())
-                        })
-                        chunk_index += 1
-                    current_chunk = para_clean
-
-            if current_chunk:
-                chunks.append({
-                    "chunk_id": f"{filename}_sem_{chunk_index}",
-                    "chunk_index": chunk_index,
-                    "text": current_chunk,
-                    "filename": filename,
-                    "page_number": page_num,
-                    "strategy": "semantic",
-                    "char_count": len(current_chunk),
-                    "word_count": len(current_chunk.split())
-                })
-                chunk_index += 1
-
-        return chunks
 
 TextChunker = DocumentChunker

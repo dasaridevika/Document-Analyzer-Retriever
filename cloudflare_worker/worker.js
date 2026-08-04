@@ -1,7 +1,7 @@
 /**
  * Production-Grade Cloudflare Worker AI Endpoint
  * Powered by @cf/baai/bge-large-en-v1.5 & @cf/meta/llama-3.1-8b-instruct
- * Optimized for Any Uploaded PDF & Exact Query Requirements
+ * Intent-Driven Document Search & Detailed Response Synthesis
  */
 
 export default {
@@ -57,7 +57,7 @@ export default {
       }
 
       // =========================================================================
-      // 2. QUERY-SPECIFIC LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
+      // 2. QUERY-SPECIFIC INTENT LLM ENDPOINT (@cf/meta/llama-3.1-8b-instruct)
       // =========================================================================
       if (
         url.pathname === "/analyze" ||
@@ -88,55 +88,44 @@ export default {
         }
 
         const body = await request.json();
-
-        // Robust Field Resolution
-        const userQuestion = (body.query || body.prompt || body.question || body.message || body.text || "Summarize the document").trim();
+        const userQuestion = (body.query || body.prompt || body.question || body.message || body.text || "Summarize document").trim();
         
         let rawContext = body.context || body.text || body.document || body.contents || "";
         if (Array.isArray(rawContext)) {
           rawContext = rawContext.map(c => typeof c === 'object' ? (c.text || JSON.stringify(c)) : String(c)).join("\n\n");
         }
 
-        // Clean Context from OCR noise artifacts
         const cleanContext = String(rawContext)
           .replace(/Visual\s*\[Page\s*\d+\]\s*Visual/gi, "")
           .replace(/^\s*Visual\s*$/gmi, "")
           .replace(/^\s*Page\s*\d+\s*\[Page\s*\d+\]\s*/gmi, "")
           .trim();
 
-        const lowerQ = userQuestion.toLowerCase().trim();
-        const isBroadQuery = body.is_broad || [
-          "explain contents", "explain the contents", "explain the pdf", "contents",
-          "summarize", "summary", "overview", "what is in", "tell me about",
-          "full document", "complete details", "describe", "table of contents"
-        ].some(k => lowerQ.includes(k));
+        const isBroadQuery = body.is_broad || false;
 
         let systemInstruction;
         if (isBroadQuery) {
-          systemInstruction = `You are an Expert Lead Document Analyst.
-The user requested a complete explanation of the document contents: "${userQuestion}".
+          systemInstruction = `You are a Senior Document Analyst.
+The user requested an executive overview of the document: "${userQuestion}".
 
-PRODUCE A PRODUCTION-GRADE EXECUTIVE SUMMARY WITH THESE EXACT SECTIONS:
-1. **Executive Overview & Primary Objective**: Summarize the core purpose and subject of the document.
-2. **Key Sections & Topics Covered**: Provide a detailed, organized breakdown of major modules, chapters, rules, or topics.
-3. **Core Technical Details & Specifications**: Detail exact figures, numbers, formulas, rules, requirements, or data.
-4. **Conclusion & Key Takeaways**: Summarize the primary conclusions.
+PRODUCE AN EXECUTIVE SUMMARY WITH THESE EXACT SECTIONS:
+1. **Executive Overview & Primary Objective**: Purpose and core topic.
+2. **Key Topics & Modules Covered**: Comprehensive breakdown of key sections.
+3. **Core Technical Specifications & Figures**: Exact values, formulas, and rules.
+4. **Key Takeaways**: Primary conclusions.
 
-RULES:
-- Base your response strictly on the provided DOCUMENT CONTEXT.
-- Cite page numbers naturally like [Page 1], [Page 4].
-- Do NOT output raw chunk headers (never print "Section (Page 1):"). Write fluent, professional markdown prose and bullet points.`;
+Cite page numbers like [Page 1], [Page 4]. Write fluent markdown prose.`;
         } else {
           systemInstruction = `You are a Master AI Document Assistant.
-CRITICAL MANDATE:
-Answer ONLY the specific query asked by the user: "${userQuestion}".
+CRITICAL INSTRUCTION:
+Provide a comprehensive, highly accurate, and detail-specific answer that directly fulfills the user's intent: "${userQuestion}".
 
-STRICT QUERY ISOLATION RULES:
-1. Focus SPECIFICALLY and ONLY on answering "${userQuestion}".
-2. Explain exact definitions, syntax, rules, code examples, steps, formulas, and methods matching "${userQuestion}".
-3. Do NOT mention, summarize, or list unrelated sections present in the document context.
-4. Cite page numbers naturally like [Page 4], [Page 12].
-5. Base your response strictly on the provided DOCUMENT CONTEXT.`;
+INTENT MATCHING RULES:
+1. Understand the core question and intent behind "${userQuestion}".
+2. Extract ALL exact figures, numbers, definitions, rules, conditions, formulas, and steps provided in the DOCUMENT CONTEXT that answer this intent.
+3. Structure your response cleanly using headers, bold key terms, and bullet points.
+4. Cite page numbers naturally like [Page X] for every fact stated.
+5. Base your answer strictly on the DOCUMENT CONTEXT provided below.`;
         }
 
         const messages = [
@@ -146,7 +135,7 @@ STRICT QUERY ISOLATION RULES:
           },
           {
             role: "user",
-            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a direct, highly accurate response answering:\n\n"${userQuestion}"`,
+            content: `Based strictly on the DOCUMENT CONTEXT provided above, write a clear, accurate, detail-specific answer for:\n\n"${userQuestion}"`,
           },
         ];
 
@@ -160,7 +149,7 @@ STRICT QUERY ISOLATION RULES:
             max_tokens: 3000,
           });
         } catch (mErr) {
-          llmResponse = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
+          llmResponse = await env.AI.run("@cf/meta/llama-8b-instruct", {
             messages: messages,
             temperature: temperature,
             max_tokens: 3000,

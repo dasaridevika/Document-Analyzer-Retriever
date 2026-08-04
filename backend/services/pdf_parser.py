@@ -17,7 +17,6 @@ class PDFParser:
         Extracts page text in exact physical reading order using sorted text blocks.
         """
         try:
-            # Sort=True extracts text blocks in logical top-to-bottom, left-to-right reading order
             blocks = page.get_text("blocks", sort=True)
             text_parts = []
             for b in blocks:
@@ -33,7 +32,7 @@ class PDFParser:
             logger.warning(f"Blocks extraction failed: {e}. Falling back to default text sort.")
 
         raw_text = page.get_text("text", sort=True) or ""
-        return "\n".join([line.strip() for line in raw_text.splitlines() if line.strip()])
+        return "\n\n".join([line.strip() for line in raw_text.splitlines() if line.strip()])
 
     @staticmethod
     def parse_pdf_file(file_path: str, filename: str) -> Dict[str, Any]:

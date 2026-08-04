@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     """
-    Production-Grade BGE Large Embedding Service:
+    Production-Grade BGE Large Embedding Service (1024-Dimension):
     - Priority 1: Live Cloudflare Worker Embedding Endpoint (@cf/baai/bge-large-en-v1.5)
-    - Priority 2: Direct Cloudflare REST API (If real credentials provided)
-    - Priority 3: Zero-Dependency High-Precision Vector Hashing Fallback
+    - Priority 2: Direct Cloudflare REST API (If credentials provided)
+    - Priority 3: 1024-Dimension Feature Hashing Fallback (Guarantees FAISS dimension alignment)
     """
 
     def __init__(self):
@@ -35,30 +35,28 @@ class EmbeddingService:
         if not texts:
             return []
 
-        # Priority 1: Use Live Cloudflare Worker BGE Large Embeddings Endpoint
+        # Priority 1: Cloudflare Worker Endpoint
         for w_url in self.worker_urls:
             try:
-                logger.info(f"Generating embeddings via Cloudflare Worker AI link at '{w_url}'...")
                 response = requests.post(w_url, json={"text": texts}, timeout=40)
                 if response.status_code == 200:
                     data = response.json()
                     vectors = data.get("data") or data.get("result", {}).get("data")
                     if isinstance(vectors, list) and len(vectors) == len(texts):
-                        logger.info("Successfully generated 1024-dim embeddings via Cloudflare Worker AI!")
                         return vectors
             except Exception as e:
                 logger.warning(f"Cloudflare Worker embedding call to '{w_url}' failed: {e}")
 
-        # Priority 2: Direct Cloudflare REST API (Only if REAL non-placeholder credentials provided)
+        # Priority 2: Direct Cloudflare REST API
         if self.account_id and self.api_token and "placeholder" not in self.account_id:
             try:
                 return self._generate_cloudflare_rest_embeddings(texts)
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API embedding failed: {e}")
 
-        # Priority 3: Zero-Dependency High-Precision Hashing Vector Fallback
-        logger.info("Using lightweight zero-dependency Hashing vector fallback...")
-        return [self._hash_embedding(t) for t in texts]
+        # Priority 3: Guaranteed 1024-dim Deterministic Hashing Fallback
+        logger.info("Using 1024-dimension Feature Hashing vector fallback...")
+        return [self._hash_embedding(t, dim=1024) for t in texts]
 
     def _generate_cloudflare_rest_embeddings(self, texts: List[str]) -> List[List[float]]:
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.model_name}"
@@ -89,14 +87,28 @@ class EmbeddingService:
         return all_embeddings
 
     @staticmethod
-    def _hash_embedding(text: str, dim: int = 384) -> List[float]:
+    def _hash_embedding(text: str, dim: int = 1024) -> List[float]:
+        """
+        Generates a 1024-dimensional normalized n-gram feature hashing vector.
+        Matches BGE-Large dimensionality.
+        """
         words = text.lower().split()
         vector = [0.0] * dim
         
+        # Word-level features
         for word in words:
-            h = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16)
+            h = int(hashlib.sha256(word.encode('utf-8')).hexdigest(), 16)
             idx = h % dim
             val = 1.0 if (h & 1) else -1.0
+            vector[idx] += val
+
+        # Character bi-gram features for subword semantics
+        clean_str = text.lower()
+        for i in range(len(clean_str) - 2):
+            bigram = clean_str[i:i+3]
+            h = int(hashlib.md5(bigram.encode('utf-8')).hexdigest(), 16)
+            idx = h % dim
+            val = 0.5 if (h & 1) else -0.5
             vector[idx] += val
 
         norm = math.sqrt(sum(x * x for x in vector))

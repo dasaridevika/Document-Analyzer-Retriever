@@ -1,7 +1,6 @@
 import requests
 import logging
 import re
-import os
 from typing import List, Dict, Any
 from backend.config import (
     CLOUDFLARE_ACCOUNT_ID,
@@ -19,32 +18,28 @@ def _extract_text_from_llm_payload(data: Any) -> str:
     """
     if isinstance(data, str):
         s = data.strip()
-        if len(s) > 10:
-            return s
-        return ""
+        return s if len(s) > 5 else ""
     if isinstance(data, dict):
-        # Check direct string fields
         for k in ["response", "answer", "output", "text"]:
             val = data.get(k)
-            if isinstance(val, str) and len(val.strip()) > 10:
+            if isinstance(val, str) and len(val.strip()) > 5:
                 return val.strip()
             elif isinstance(val, dict):
                 sub = _extract_text_from_llm_payload(val)
                 if sub:
                     return sub
-
-        # Check 'result' field
         res = data.get("result")
         if res:
             return _extract_text_from_llm_payload(res)
-
     return ""
 
 class RAGEngine:
     """
-    Production-Grade FAISS RAGEngine:
-    Synthesizes exact, intelligent LLM answers from Top-K retrieved chunks using Cloudflare Workers AI
-    (@cf/meta/llama-3.1-8b-instruct). Never returns raw unparsed chunk blocks.
+    Production-Grade Intent-Driven RAG Engine:
+    - Intent-based Query Expansion
+    - Hybrid Search (BGE Dense + BM25 Lexical) via Reciprocal Rank Fusion
+    - Score Thresholding & Context Noise Filtering
+    - Strict Intent Synthesis & Page Citation Formatting
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -55,24 +50,39 @@ class RAGEngine:
         self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct"
         self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
-    def _clean_response_artifacts(self, text: str) -> str:
-        if not text:
-            return ""
-        cleaned = re.sub(r'Visual\s*\[Page\s*\d+\]\s*Visual', '', text, flags=re.IGNORECASE)
-        cleaned = re.sub(r'^\s*Visual\s*$', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
-        cleaned = re.sub(r'^\s*Page\s*\d+\s*\[Page\s*\d+\]\s*', '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
-        cleaned = re.sub(r'###\s*Key\s*Content\s*Excerpt.*?\n', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        return cleaned.strip()
-
     def _is_broad_query(self, query: str) -> bool:
         lower_q = query.lower().strip("?!.,")
-        broad_keywords = [
-            "summarize", "summary", "overview", "contents", "explain contents", "explain the contents",
-            "explain the pdf", "what is in", "tell me about", "full document", "complete details",
-            "main topics", "key points", "what is this", "describe", "table of contents", "index"
+        broad_phrases = [
+            "summarize the document", "full document summary", "executive summary",
+            "table of contents", "overview of the file", "what is this document about",
+            "complete overview", "summarize entire document"
         ]
-        return any(k in lower_q for k in broad_keywords) or (len(query.split()) <= 3 and lower_q in ["explain", "describe", "details"])
+        return any(phrase in lower_q for phrase in broad_phrases)
+
+    def _expand_query_intent(self, query: str) -> List[str]:
+        expanded = [query]
+        lower_q = query.lower()
+
+        synonym_map = {
+            "cost": ["price", "pricing", "fee", "rate", "charge", "payment", "amount"],
+            "penalty": ["fine", "fee", "charge", "delayed", "late", "rejection", "sanction"],
+            "fee": ["cost", "price", "pricing", "rate", "charge", "due", "fine"],
+            "requirement": ["criteria", "condition", "prerequisite", "rule", "specification"],
+            "how to": ["steps", "procedure", "method", "instructions", "guide"],
+            "due date": ["deadline", "timeline", "due date", "expiration", "period"],
+            "contact": ["email", "phone", "address", "support", "helpdesk"]
+        }
+
+        added_terms = []
+        for key, terms in synonym_map.items():
+            if key in lower_q:
+                added_terms.extend(terms)
+
+        if added_terms:
+            expanded_str = query + " " + " ".join(added_terms[:6])
+            expanded.append(expanded_str)
+
+        return expanded
 
     def answer_query(
         self,
@@ -85,72 +95,75 @@ class RAGEngine:
         effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         clean_query = query.strip()
 
-        # Conversational Greetings
+        # Handle Greetings
         lower_q = clean_query.lower().strip("?!.,")
         if lower_q in ["hi", "hello", "hey", "greetings", "who are you", "what can you do"]:
-            doc_name = f"'{filename}'" if filename else "your documents"
+            doc_name = f"'{filename}'" if filename else "your uploaded documents"
             return {
-                "answer": f"Hello! Ask me any question about {doc_name}, and I will analyze the top matched sections to give you an exact answer with page citations.",
+                "answer": f"Hello! Ask me any detailed question about {doc_name}, and I will analyze the exact sections to give you an accurate, citation-backed answer.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
             }
 
         is_broad = self._is_broad_query(clean_query)
+        queries_to_embed = self._expand_query_intent(clean_query)
 
-        # 1. Retrieve Top-K Semantic Similarity Chunks for the Query
-        similarity_chunks = []
-        query_embeddings = self.embedding_service.generate_embeddings([clean_query])
-        if query_embeddings:
-            query_vec = query_embeddings[0]
-            similarity_chunks = self.vector_store.similarity_search(
-                query_embedding=query_vec,
-                top_k=top_k,
-                filename_filter=filename
-            )
-
-        # 2. Retrieve Distributed Coverage Chunks
-        distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
-
-        merged_chunks = []
+        # 1. Intent Vector Search across Expanded Queries
+        all_retrieved = []
         seen_ids = set()
 
+        for q_text in queries_to_embed:
+            q_embeddings = self.embedding_service.generate_embeddings([q_text])
+            if q_embeddings:
+                chunks = self.vector_store.similarity_search(
+                    query_embedding=q_embeddings[0],
+                    raw_query=clean_query,
+                    top_k=top_k,
+                    filename_filter=filename,
+                    min_score=0.15
+                )
+                for c in chunks:
+                    cid = c["chunk_id"]
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        all_retrieved.append(c)
+
+        all_retrieved.sort(key=lambda x: x.get("rrf_score", x.get("similarity_score", 0)), reverse=True)
+
+        # 2. Context Selection
         if is_broad:
-            ordered_pool = distributed_chunks + similarity_chunks
-            max_chunks_to_llm = 8
+            distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=6)
+            for dc in distributed_chunks:
+                if dc["chunk_id"] not in seen_ids:
+                    all_retrieved.append(dc)
+                    seen_ids.add(dc["chunk_id"])
+
+            target_chunks = all_retrieved[:8]
         else:
-            ordered_pool = similarity_chunks + distributed_chunks
-            max_chunks_to_llm = 5
+            target_chunks = all_retrieved[:max(5, top_k)]
 
-        for c in ordered_pool:
-            cid = c["chunk_id"]
-            if cid not in seen_ids:
-                seen_ids.add(cid)
-                merged_chunks.append(c)
+        if not target_chunks and filename:
+            logger.info("Fallback: Retrieving distributed document chunks...")
+            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=5)
 
-        if not merged_chunks and filename:
-            logger.info("Fallback: retrieving distributed chunks across all indexed documents...")
-            merged_chunks = self.vector_store.get_distributed_chunks(filename=None, count=8)
-
-        if not merged_chunks:
+        if not target_chunks:
             return {
-                "answer": "I searched the document context, but I could not find relevant information matching your question.",
+                "answer": "I analyzed the document context, but could not find relevant content matching your query intent.",
                 "sources": [],
                 "system_prompt_used": effective_system_prompt,
                 "retrieved_count": 0
             }
 
-        target_chunks = merged_chunks[:max_chunks_to_llm]
-
-        # 3. Format Top-K Context Excerpts for LLM Answer Extraction
+        # 3. Format Context
         context_blocks = []
         for i, chunk in enumerate(target_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            context_blocks.append(f"--- [TOP-K MATCH {i+1} | File: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
+            context_blocks.append(f"--- [EXCERPT {i+1} | Document: {doc_fname} | Page {page_num}] ---\n{chunk['text']}")
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. Extract & Synthesize Exact Answer via Cloudflare Workers AI
+        # 4. LLM Synthesis
         raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -160,7 +173,7 @@ class RAGEngine:
             temperature=temperature
         )
 
-        clean_answer = self._clean_response_artifacts(raw_answer)
+        clean_answer = raw_answer.strip()
 
         sources = [
             {
@@ -198,14 +211,10 @@ class RAGEngine:
 
         for target_url in endpoints:
             try:
-                logger.info(f"Calling Cloudflare Worker AI endpoint at '{target_url}'...")
                 resp = requests.post(target_url, json=payload, timeout=50)
-                
                 if resp.status_code == 200:
-                    data = resp.json()
-                    extracted_text = _extract_text_from_llm_payload(data)
-                    if extracted_text:
-                        logger.info("Successfully extracted LLM answer from Cloudflare Worker AI!")
+                    extracted_text = _extract_text_from_llm_payload(resp.json())
+                    if extracted_text and len(extracted_text) > 15:
                         return extracted_text
             except Exception as e:
                 logger.warning(f"Failed calling worker endpoint '{target_url}': {e}")
@@ -221,32 +230,19 @@ class RAGEngine:
             "Content-Type": "application/json"
         }
 
-        if is_broad:
-            system_instruction = f"""You are a Senior Technical Document Lead.
-The user asked for an explanation of the document contents: "{query}".
-
-Read the provided Top-K Document Context and synthesize a comprehensive answer structured as follows:
-1. **Executive Overview & Purpose**: Explain the core subject of the document.
-2. **Key Sections & Topics Covered**: Provide a detailed, organized breakdown of major topics, modules, or rules.
-3. **Core Details & Specifications**: Highlight important rules, formulas, components, or requirements found in the context.
-4. **Key Takeaways**: Summarize the primary takeaways.
-
-Cite page numbers naturally in brackets like [Page 1], [Page 4].
-Do NOT print raw chunk headers. Write fluent, professional prose and bullet points."""
-        else:
-            system_instruction = f"""You are an Expert AI Document Assistant.
-Your task is to find the exact answer to the user's question: "{query}" from the provided Top-K Document Context.
+        system_instruction = f"""You are a Master AI Document Specialist.
+CRITICAL INSTRUCTION:
+Your goal is to answer the user's intent: "{query}" based strictly on the provided DOCUMENT EXCERPTS.
 
 RULES:
-1. Read the Top-K Document Context carefully and extract the EXACT answer matching "{query}".
-2. Explain the answer thoroughly using clear paragraphs, bold terms, and bullet points.
-3. Do NOT output raw chunk headers or dump unparsed text.
-4. Cite page numbers naturally like [Page 4], [Page 8].
-5. Base your response strictly on the provided Top-K Document Context."""
+1. Understand what the user wants to know and extract ALL exact definitions, numbers, formulas, rules, conditions, and steps matching their query intent.
+2. Structure your answer using clear headers, bold key phrases, and organized bullet points.
+3. Cite page numbers naturally like [Page X] for every fact or figure stated.
+4. If the context does not contain the answer, explicitly state what is missing instead of guessing."""
 
         messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"Based strictly on the Top-K Document Context provided, extract and write the exact answer for:\n\n\"{query}\""}
+            {"role": "system", "content": f"{system_instruction}\n\nDOCUMENT EXCERPTS:\n{context}"},
+            {"role": "user", "content": f"Based strictly on the DOCUMENT EXCERPTS above, synthesize a complete, detail-specific answer answering the user's question:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -255,15 +251,12 @@ RULES:
             "max_tokens": 3000
         }
 
-        logger.info(f"Calling Cloudflare Workers AI REST API model '{self.llm_model}'...")
         resp = requests.post(url, headers=headers, json=payload, timeout=45)
-        
         if resp.status_code != 200:
             raise RuntimeError(f"Cloudflare REST API HTTP {resp.status_code}: {resp.text}")
 
-        data = resp.json()
-        extracted_text = _extract_text_from_llm_payload(data)
-        if extracted_text:
+        extracted_text = _extract_text_from_llm_payload(resp.json())
+        if extracted_text and len(extracted_text) > 15:
             return extracted_text
 
         raise RuntimeError("Cloudflare REST API response did not contain valid text.")
@@ -271,7 +264,7 @@ RULES:
     def _generate_detailed_llm_response(
         self, system_prompt: str, context: str, query: str, is_broad: bool, retrieved_chunks: List[Dict[str, Any]], temperature: float
     ) -> str:
-        # Priority 1: Cloudflare Worker AI Live Endpoint
+        # Priority 1: Cloudflare Worker Endpoint
         if self.worker_base_url:
             try:
                 ans = self._generate_cloudflare_worker_llm(system_prompt, context, query, is_broad, temperature)
@@ -280,7 +273,7 @@ RULES:
             except Exception as e:
                 logger.warning(f"Cloudflare Worker AI call failed: {e}")
 
-        # Priority 2: Direct Cloudflare REST API if account_id set
+        # Priority 2: Direct REST API
         if self.account_id and self.api_token:
             try:
                 ans = self._generate_cloudflare_rest_llm(system_prompt, context, query, is_broad, temperature)
@@ -289,17 +282,42 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Intelligent Sentence QA Synthesizer (Extracts exact facts from Top-K chunks instead of raw chunk dumping)
-        answer_sentences = []
-        for idx, chunk in enumerate(retrieved_chunks[:4]):
-            page_num = chunk["metadata"].get("page_number", "?")
-            text = chunk["text"].strip()
-            lines = [l.strip() for l in text.splitlines() if l.strip() and len(l.strip()) > 15]
+        # Priority 3: Fallback Context Synthesizer (Intent & Keyword Matched Extractor)
+        extracted_lines = []
+        q_words = set(re.findall(r'\w+', query.lower()))
+        synonym_map = {
+            "penalty": ["fine", "fee", "charge", "delayed", "late", "rejection", "sanction"],
+            "late": ["delayed", "overdue", "deadline"],
+            "submission": ["filing", "claim", "submit"]
+        }
+        expanded_words = set(q_words)
+        for k, vals in synonym_map.items():
+            if k in q_words:
+                expanded_words.update(vals)
 
-            for line in lines[:3]:
-                answer_sentences.append(f"• {line} [Page {page_num}]")
+        ignore_words = {"what", "is", "the", "how", "to", "are", "in", "of", "for", "a", "an", "and", "or", "tell", "me", "about"}
+        keywords = expanded_words - ignore_words
 
-        if answer_sentences:
-            return f"Based on the top matched sections in your document for **\"{query}\"**, here is the extracted answer:\n\n" + "\n".join(answer_sentences)
+        for chunk in retrieved_chunks:
+            page = chunk["metadata"].get("page_number", "?")
+            lines = chunk["text"].splitlines()
+            for line in lines:
+                clean_line = line.strip()
+                if len(clean_line) > 15 and not clean_line.startswith("[Document:"):
+                    line_words = set(re.findall(r'\w+', clean_line.lower()))
+                    if keywords and (keywords & line_words):
+                        extracted_lines.append(f"• {clean_line} [Page {page}]")
 
-        return f"I analyzed the document context for **\"{query}\"**, but could not extract a complete answer."
+        if extracted_lines:
+            return f"### Extracted Information for **\"{query}\"**:\n\n" + "\n".join(extracted_lines[:8])
+
+        default_sentences = []
+        for c in retrieved_chunks[:3]:
+            page = c["metadata"].get("page_number", "?")
+            raw_text = c.get("raw_content", c["text"])
+            snippet = raw_text.replace("\n", " ").strip()
+            if len(snippet) > 150:
+                snippet = snippet[:150] + "..."
+            default_sentences.append(f"• {snippet} [Page {page}]")
+
+        return f"Based on the document sections for **\"{query}\"**:\n\n" + "\n".join(default_sentences)
