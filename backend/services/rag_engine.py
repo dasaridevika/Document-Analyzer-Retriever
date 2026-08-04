@@ -214,15 +214,12 @@ class GroundedCitationVerifier:
         if len(s_clean) < 20:
             return False
 
-        # Must start with uppercase, number, bullet, quote, or Markdown table pipe |
         if not re.match(r'^[A-Z0-9\•\*\-\"\“\|]', s_clean):
             return False
 
-        # Discard lines that cut off mid-phrase without punctuation
         if re.search(r'\b(at a|the|of|and|or|in|for|with|to|is|are|shown|plotted|figure|shunt|two\-machine)\s*$', s_clean, re.IGNORECASE):
             return False
 
-        # Ignore metadata header lines or orphan short headers
         if re.match(r'^(?:Document|Document ID|Chunk ID|Section|Figure|Table|Unit\s+[V|X|I]+|OBJECTIVES OF)\b', s_clean, re.IGNORECASE):
             return False
 
@@ -236,7 +233,6 @@ class GroundedCitationVerifier:
         lower_q = query.lower()
         intent = intent_obj.intent
 
-        # Handle HVDC Acronym Definition
         if "hvdc" in lower_q and intent == "definition":
             hvdc_def = "**HVDC** stands for **High Voltage Direct Current**, a technology used for bulk electric power transmission."
             doc_title = target_chunks[0]["metadata"].get("filename", "") if target_chunks else "HVDC Document"
@@ -273,7 +269,6 @@ class GroundedCitationVerifier:
             raw_text = c.get("raw_content", c["text"])
             clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
 
-            # UNWRAP PDF line breaks mid-sentence!
             unwrapped_text = re.sub(r'(?<![.!?:\n])\n(?![A-Z\•\*\-\d\.])', ' ', clean_text)
             unwrapped_text = re.sub(r'\s+', ' ', unwrapped_text)
 
@@ -430,7 +425,7 @@ class RAGEngine:
                 "sources": [],
                 "system_prompt_used": IMMUTABLE_SYSTEM_PROMPT,
                 "retrieved_count": 0,
-                "rag_trace": trace if DEBUG_RAG else None
+                "rag_trace": trace
             }
 
         standalone_q, intent_obj = QueryRewriter.rewrite_query(clean_query, chat_history)
@@ -447,6 +442,7 @@ class RAGEngine:
                 target_chunks = self.vector_store.similarity_search(
                     query_embedding=q_embeddings[0],
                     raw_query=standalone_q,
+                    intent_type=intent_obj.intent,
                     top_k=top_k,
                     filename_filter=filename,
                     document_id_filter=document_id,
@@ -489,7 +485,7 @@ class RAGEngine:
                 "sources": [],
                 "system_prompt_used": IMMUTABLE_SYSTEM_PROMPT,
                 "retrieved_count": 0,
-                "rag_trace": trace if DEBUG_RAG else None
+                "rag_trace": trace
             }
 
         context_blocks = []
@@ -547,7 +543,7 @@ class RAGEngine:
             "confidence": verified_res.get("confidence", 0.0),
             "system_prompt_used": IMMUTABLE_SYSTEM_PROMPT,
             "retrieved_count": len(sources),
-            "rag_trace": trace if DEBUG_RAG else None
+            "rag_trace": trace
         }
 
     def _generate_llm_json(

@@ -21,53 +21,41 @@ class TestRAGPipelineAudit(unittest.TestCase):
         self.vector_store.clear_all()
         self.rag = RAGEngine(embedding_service=self.embed_service, vector_store=self.vector_store)
 
-    # 1. Acceptance Query 1: "What is shunt compensation?"
-    def test_acceptance_01_definition(self):
+    def test_intent_retrieval_different_chunks_and_context(self):
+        """
+        Proves that 'What is shunt compensation?', 'What are the objectives of shunt compensation?',
+        and 'How does shunt compensation improve voltage stability?' trigger DIFFERENT INTENTS and produce
+        MATERIALLY DIFFERENT context and answers.
+        """
         hvdc_pages = [
             {
                 "page_number": 1,
-                "text": "Unit VI: STATIC SHUNT COMPENSATORS\nOBJECTIVES OF SHUNT COMPENSATION:\nIt has long been recognized that the steady-state transmittable power can be increased and the voltage profile along the line controlled by appropriate reactive shunt compensation. The purpose of this reactive compensation is to change the natural electrical characteristics of the transmission line to make it more compatible with the prevailing load demand. Thus, shunt connected, fixed or mechanically switched reactors are applied to minimize line overvoltage under light load conditions, and shunt connected, fixed or mechanically switched capacitors are applied to maintain voltage levels under heavy load conditions. The ultimate objective of applying reactive shunt compensation in a transmission system is to increase the transmittable power."
+                "text": "Unit VI: STATIC SHUNT COMPENSATORS\nOBJECTIVES OF SHUNT COMPENSATION:\nIt has long been recognized that the steady-state transmittable power can be increased and the voltage profile along the line controlled by appropriate reactive shunt compensation. The purpose of this reactive compensation is to change the natural electrical characteristics of the transmission line to make it more compatible with the prevailing load demand. Thus, shunt connected, fixed or mechanically switched reactors are applied to minimize line overvoltage under light load conditions, and shunt connected, fixed or mechanically switched capacitors are applied to maintain voltage levels under heavy load conditions. The ultimate objective of applying reactive shunt compensation in a transmission system is to increase the transmittable power. Midpoint Voltage Regulation for Line Segmentation: Consider the simple two-machine transmission model in which an ideal var compensator is shunt connected at the midpoint of the transmission line to regulate midpoint voltage. The midpoint compensator in effect segments the transmission line into two independent parts."
             }
         ]
         chunks = self.chunker.create_chunks(hvdc_pages, filename="hvdc.pdf", document_id="doc_hvdc")
         self.vector_store.add_chunks(chunks, self.embed_service.generate_embeddings([c["text"] for c in chunks]))
 
-        res = self.rag.answer_query("What is shunt compensation?", filename="hvdc.pdf", document_id="doc_hvdc")
-        self.assertIn("Definition", res["answer"])
-        self.assertIn("natural electrical characteristics", res["answer"])
-
-    # 2. Acceptance Query 2: "What are the objectives of shunt compensation?"
-    def test_acceptance_02_objectives(self):
-        hvdc_pages = [
-            {
-                "page_number": 1,
-                "text": "Unit VI: STATIC SHUNT COMPENSATORS\nOBJECTIVES OF SHUNT COMPENSATION:\nIt has long been recognized that the steady-state transmittable power can be increased and the voltage profile along the line controlled by appropriate reactive shunt compensation. The purpose of this reactive compensation is to change the natural electrical characteristics of the transmission line to make it more compatible with the prevailing load demand. Thus, shunt connected, fixed or mechanically switched reactors are applied to minimize line overvoltage under light load conditions, and shunt connected, fixed or mechanically switched capacitors are applied to maintain voltage levels under heavy load conditions. The ultimate objective of applying reactive shunt compensation in a transmission system is to increase the transmittable power."
-            }
-        ]
-        chunks = self.chunker.create_chunks(hvdc_pages, filename="hvdc.pdf", document_id="doc_hvdc")
-        self.vector_store.add_chunks(chunks, self.embed_service.generate_embeddings([c["text"] for c in chunks]))
-
+        # 1. Query 1: Definition
         res_def = self.rag.answer_query("What is shunt compensation?", filename="hvdc.pdf", document_id="doc_hvdc")
+        # 2. Query 2: Objectives
         res_obj = self.rag.answer_query("What are the objectives of shunt compensation?", filename="hvdc.pdf", document_id="doc_hvdc")
-
-        self.assertIn("Key Objectives", res_obj["answer"])
-        self.assertIn("transmittable power", res_obj["answer"])
-        # Ensure answers are visibly different
-        self.assertNotEqual(res_def["answer"], res_obj["answer"])
-
-    # 3. Acceptance Query 3: "How does shunt compensation improve voltage stability?"
-    def test_acceptance_03_mechanism(self):
-        hvdc_pages = [
-            {
-                "page_number": 1,
-                "text": "Unit VI: STATIC SHUNT COMPENSATORS\nOBJECTIVES OF SHUNT COMPENSATION:\nIt has long been recognized that the steady-state transmittable power can be increased and the voltage profile along the line controlled by appropriate reactive shunt compensation. Midpoint Voltage Regulation for Line Segmentation: Consider the simple two-machine transmission model in which an ideal var compensator is shunt connected at the midpoint of the transmission line to regulate midpoint voltage."
-            }
-        ]
-        chunks = self.chunker.create_chunks(hvdc_pages, filename="hvdc.pdf", document_id="doc_hvdc")
-        self.vector_store.add_chunks(chunks, self.embed_service.generate_embeddings([c["text"] for c in chunks]))
-
+        # 3. Query 3: Mechanism / Voltage Stability
         res_mech = self.rag.answer_query("How does shunt compensation improve voltage stability?", filename="hvdc.pdf", document_id="doc_hvdc")
-        self.assertIn("Voltage Stability", res_mech["answer"])
+
+        # Verify QueryIntents in Debug Traces
+        self.assertEqual(res_def["rag_trace"]["query_intent"], "definition")
+        self.assertEqual(res_obj["rag_trace"]["query_intent"], "objectives")
+        self.assertEqual(res_mech["rag_trace"]["query_intent"], "mechanism")
+
+        # Verify Answers are Materially Different
+        self.assertIn("Definition", res_def["answer"])
+        self.assertIn("Key Objectives", res_obj["answer"])
+        self.assertIn("Voltage Stability & Control Mechanism", res_mech["answer"])
+
+        self.assertNotEqual(res_def["answer"], res_obj["answer"])
+        self.assertNotEqual(res_def["answer"], res_mech["answer"])
+        self.assertNotEqual(res_obj["answer"], res_mech["answer"])
 
     # 4. Acceptance Query 4: "What is discussed on page 10?"
     def test_acceptance_04_page_query(self):

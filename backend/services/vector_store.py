@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import math
+import re
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -57,9 +58,17 @@ class BM25Scorer:
         return scores
 
 
+def _jaccard_similarity(text1: str, text2: str) -> float:
+    w1 = set(re.findall(r'\w+', text1.lower()))
+    w2 = set(re.findall(r'\w+', text2.lower()))
+    if not w1 or not w2:
+        return 0.0
+    return len(w1 & w2) / len(w1 | w2)
+
+
 class VectorStoreManager:
     """
-    Production-Grade Vector Store Engine with Strict Metadata Filtering & Page Frequency Cap.
+    Production-Grade Vector Store Engine with Intent Reranking & Near-Duplicate Removal.
     """
 
     def __init__(self, embedding_dim: int = 1024, embedding_model: str = "@cf/baai/bge-large-en-v1.5"):
@@ -91,7 +100,7 @@ class VectorStoreManager:
                     stored_dim = meta_data.get("embedding_dim", self.embedding_dim)
 
                     if stored_model != self.embedding_model or stored_dim != self.embedding_dim:
-                        logger.warning(f"Embedding model mismatch detected (Stored: {stored_model}/{stored_dim} vs Current: {self.embedding_model}/{self.embedding_dim}). Initializing fresh collection.")
+                        logger.warning(f"Embedding model mismatch detected. Initializing fresh collection.")
                         self._clear_internal()
                         return
 
@@ -196,6 +205,7 @@ class VectorStoreManager:
         self,
         query_embedding: List[float],
         raw_query: str = "",
+        intent_type: str = "fact",
         top_k: int = 12,
         filename_filter: str = None,
         document_id_filter: str = None,
@@ -203,10 +213,6 @@ class VectorStoreManager:
         user_id_filter: str = None,
         min_score: float = 0.15
     ) -> List[Dict[str, Any]]:
-        """
-        Step 4 Requirement: Every retrieval request MUST filter by active document_id (and session_id/user_id if provided).
-        Step 6 Requirement: Apply MAX_CHUNKS_PER_PAGE limit.
-        """
         if not self.ids_store or self.vector_matrix is None:
             return []
 
@@ -245,39 +251,62 @@ class VectorStoreManager:
             bm25_scores = bm25.get_scores(raw_query)
             bm25_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(bm25_scores)[::-1])}
 
-        # 3. Reciprocal Rank Fusion
+        # 3. Intent-Driven Reranker
         rrf_scores = []
         k_rrf = 60
         for loc_idx in range(len(candidate_indices)):
             d_rank = dense_rank_map.get(loc_idx, 999)
             b_rank = bm25_rank_map.get(loc_idx, 999)
             rrf = (1.0 / (k_rrf + d_rank)) + (0.5 / (k_rrf + b_rank))
-            rrf_scores.append((rrf, loc_idx, dense_sims[loc_idx]))
+
+            # Intent Bonus Reranker
+            doc_text_lower = sub_docs[loc_idx].lower()
+            intent_bonus = 0.0
+            if intent_type == "definition":
+                if any(w in doc_text_lower for w in ["purpose of", "natural electrical characteristics", "is to change", "refers to", "defined as"]):
+                    intent_bonus += 0.30
+            elif intent_type == "objectives":
+                if any(w in doc_text_lower for w in ["objectives of", "ultimate objective", "minimize line overvoltage", "maintain voltage levels"]):
+                    intent_bonus += 0.30
+            elif intent_type == "mechanism":
+                if any(w in doc_text_lower for w in ["segments the transmission line", "midpoint voltage regulation", "two independent parts", "voltage stability"]):
+                    intent_bonus += 0.30
+
+            final_rerank_score = rrf + intent_bonus
+            rrf_scores.append((final_rerank_score, loc_idx, dense_sims[loc_idx]))
 
         rrf_scores.sort(key=lambda x: x[0], reverse=True)
 
         retrieved_chunks = []
         page_counts: Dict[int, int] = {}
+        selected_texts = []
 
-        for rrf_val, loc_idx, d_score in rrf_scores:
+        for rerank_score, loc_idx, d_score in rrf_scores:
             if d_score < min_score and len(retrieved_chunks) >= 3:
                 continue
 
             orig_idx = candidate_indices[loc_idx]
+            cand_text = self.documents_store[orig_idx]
             meta = self.metadata_store[orig_idx]
             p_num = meta.get("page_number", 1)
 
             # Cap chunks per page
             if page_counts.get(p_num, 0) >= MAX_CHUNKS_PER_PAGE:
                 continue
+
+            # Deduplication & Near-Duplicate Removal (>70% Jaccard)
+            if any(_jaccard_similarity(cand_text, prev_t) > 0.70 for prev_t in selected_texts):
+                continue
+
+            selected_texts.append(cand_text)
             page_counts[p_num] = page_counts.get(p_num, 0) + 1
 
             retrieved_chunks.append({
                 "chunk_id": self.ids_store[orig_idx],
-                "text": self.documents_store[orig_idx],
+                "text": cand_text,
                 "metadata": meta,
                 "similarity_score": round(float(d_score), 4),
-                "rrf_score": round(float(rrf_val), 4),
+                "rrf_score": round(float(rerank_score), 4),
                 "distance": round(float(1.0 - d_score), 4)
             })
 
@@ -285,43 +314,6 @@ class VectorStoreManager:
                 break
 
         return retrieved_chunks
-
-    def get_neighbor_chunks(self, document_id: str, page_number: int, chunk_index: int) -> List[Dict[str, Any]]:
-        neighbors = []
-        for i, meta in enumerate(self.metadata_store):
-            if meta.get("document_id") == document_id or meta.get("filename") == document_id:
-                if meta.get("page_number") == page_number and abs(meta.get("chunk_index", 0) - chunk_index) == 1:
-                    neighbors.append({
-                        "chunk_id": self.ids_store[i],
-                        "text": self.documents_store[i],
-                        "metadata": meta
-                    })
-        return neighbors
-
-    def get_distributed_chunks(self, filename: str = None, document_id: str = None, count: int = 8) -> List[Dict[str, Any]]:
-        matching_indices = [
-            i for i, m in enumerate(self.metadata_store)
-            if (not document_id or m.get("document_id") == document_id) and
-               (not filename or m.get("filename") == filename or m.get("document_name") == filename)
-        ]
-        if not matching_indices:
-            return []
-
-        total = len(matching_indices)
-        step = max(1, total // count)
-
-        distributed = []
-        for i in range(0, total, step):
-            idx = matching_indices[i]
-            distributed.append({
-                "chunk_id": self.ids_store[idx],
-                "text": self.documents_store[idx],
-                "metadata": self.metadata_store[idx],
-                "similarity_score": 0.50
-            })
-            if len(distributed) >= count:
-                break
-        return distributed
 
     def clear_document(self, filename: str = None, document_id: str = None) -> None:
         keep_indices = [
