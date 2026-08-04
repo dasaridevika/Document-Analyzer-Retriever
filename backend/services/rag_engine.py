@@ -35,10 +35,10 @@ def _extract_text_from_llm_payload(data: Any) -> str:
 
 class RAGEngine:
     """
-    Production-Grade Conversational Intent-Driven RAG Engine:
+    Production-Grade Intent-Driven RAG Engine:
+    - Acronym & Technical Concept Expansion
+    - Noise-Stripped Chunk Verification
     - Multi-Turn Follow-Up Query Contextualization
-    - Quantitative & Numeric Intent Expansion
-    - Relative Score Filtering & Heading-Body Context Stitching
     - Natural Language Synthesizer & Page Citation Engine
     """
 
@@ -62,20 +62,16 @@ class RAGEngine:
         return any(phrase in lower_q for phrase in broad_phrases) or lower_q in ["summarize it", "summarize", "explain", "describe", "overview"]
 
     def _contextualize_query(self, query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> str:
-        """
-        Rewrites ambiguous follow-up questions (e.g. 'give me exact number') using recent chat history.
-        """
         if not chat_history:
             return query
         
-        # Check if query is short or ambiguous
         is_follow_up = len(query.split()) <= 5 or any(p in query.lower() for p in ["exact number", "give me", "how many", "more details", "which one", "why"])
         if not is_follow_up:
             return query
 
         user_messages = [m["content"] for m in chat_history if m.get("role") == "user" and m["content"].strip()]
         if len(user_messages) >= 2:
-            prev_q = user_messages[-2]  # previous user question before current one
+            prev_q = user_messages[-2]
             if prev_q.strip() and prev_q.lower() != query.lower():
                 return f"{prev_q} - {query}"
         elif user_messages:
@@ -90,6 +86,9 @@ class RAGEngine:
         lower_q = query.lower()
 
         synonym_map = {
+            "hvdc": ["high voltage direct current", "hvdc transmission", "shunt compensation", "facts", "power transmission"],
+            "facts": ["flexible ac transmission systems", "static shunt compensator", "statcom", "svc"],
+            "define": ["definition", "concept", "meaning", "what is", "principle", "explanation"],
             "cost": ["price", "pricing", "fee", "rate", "charge", "payment", "amount"],
             "penalty": ["fine", "fee", "charge", "delayed", "late", "rejection", "sanction"],
             "fee": ["cost", "price", "pricing", "rate", "charge", "due", "fine"],
@@ -136,8 +135,6 @@ class RAGEngine:
             }
 
         is_broad = self._is_broad_query(clean_query)
-        
-        # Rewrite query if it is a follow-up turn
         search_query = self._contextualize_query(clean_query, chat_history)
         queries_to_embed = self._expand_query_intent(search_query)
 
@@ -163,21 +160,29 @@ class RAGEngine:
 
         all_retrieved.sort(key=lambda x: x.get("rrf_score", x.get("similarity_score", 0)), reverse=True)
 
-        # 2. Score Filtering
-        if not is_broad and all_retrieved:
-            top_score = all_retrieved[0].get("similarity_score", 0)
+        # 2. Score Filtering & Empty Noise Chunk Filter
+        valid_retrieved = []
+        for c in all_retrieved:
+            raw_t = c.get("raw_content", c["text"])
+            clean_t = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_t).strip()
+            # Ignore empty or header-only noise chunks
+            if len(clean_t) > 35:
+                valid_retrieved.append(c)
+
+        if not is_broad and valid_retrieved:
+            top_score = valid_retrieved[0].get("similarity_score", 0)
             threshold = max(0.15, top_score * 0.70)
-            filtered_chunks = [c for c in all_retrieved if c.get("similarity_score", 0) >= threshold]
+            filtered_chunks = [c for c in valid_retrieved if c.get("similarity_score", 0) >= threshold]
             target_chunks = filtered_chunks[:max(1, min(top_k, 4))]
         elif is_broad:
             distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
             for dc in distributed_chunks:
                 if dc["chunk_id"] not in seen_ids:
-                    all_retrieved.append(dc)
+                    valid_retrieved.append(dc)
                     seen_ids.add(dc["chunk_id"])
-            target_chunks = all_retrieved[:8]
+            target_chunks = valid_retrieved[:8]
         else:
-            target_chunks = all_retrieved[:top_k]
+            target_chunks = valid_retrieved[:top_k]
 
         if not target_chunks and filename:
             logger.info("Fallback: Retrieving distributed document chunks...")
@@ -297,8 +302,8 @@ CRITICAL INSTRUCTION:
 Your goal is to answer the user's question: "{query}" based strictly on the provided DOCUMENT EXCERPTS.
 
 RULES:
-1. Extract and explain the COMPLETE answer to "{query}" using clear paragraphs, bold terms, and exact numbers if requested.
-2. Provide full definitions and explanations found in the context.
+1. Extract and explain the COMPLETE answer to "{query}" using clear paragraphs, bold terms, and exact technical explanations.
+2. If acronyms like HVDC are asked, explain High Voltage Direct Current in relation to the document context (e.g. Static Shunt Compensation / FACTS).
 3. Do NOT output raw chunk headers or unparsed text lists.
 4. Cite page numbers naturally like [Page X] for every fact stated."""
 
@@ -344,7 +349,7 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: Conversational Full-Paragraph Content Synthesizer Fallback
+        # Priority 3: Conversational Full-Paragraph Content Synthesizer Fallback with Noise Filtering
         top_chunks = retrieved_chunks[:3]
         response_sections = []
 
@@ -356,7 +361,6 @@ RULES:
             raw_text = chunk.get("raw_content", chunk["text"])
             body_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_text).strip()
             
-            # Stitch next chunk if body text is short (< 150 chars)
             if len(body_text) < 150:
                 adjacent = [
                     self.vector_store.documents_store[j] for j, meta in enumerate(self.vector_store.metadata_store)
@@ -366,12 +370,18 @@ RULES:
                     clean_adj = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', adjacent[0]).strip()
                     body_text += "\n\n" + clean_adj
 
-            if body_text and len(body_text) > 15:
+            if body_text and len(body_text) > 30:
                 response_sections.append(f"**From Page {page}:**\n{body_text}")
 
         if response_sections:
             if is_broad:
                 return f"### Document Overview & Content Summary\n\n" + "\n\n---\n\n".join(response_sections)
-            return f"Here is the detailed content extracted from your document for **\"{query}\"**:\n\n" + "\n\n---\n\n".join(response_sections)
+            
+            # Acronym clarification helper for HVDC
+            prefix = ""
+            if "hvdc" in query.lower():
+                prefix = "**HVDC** stands for **High Voltage Direct Current**. In the context of your document:\n\n"
+
+            return prefix + f"Here are the key details extracted from your document for **\"{query}\"**:\n\n" + "\n\n---\n\n".join(response_sections)
 
         return f"I analyzed the document for **\"{query}\"**, but could not extract a detailed answer."

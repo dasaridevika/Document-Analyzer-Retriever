@@ -1,5 +1,6 @@
 import fitz  # PyMuPDF
 import gc
+import re
 from typing import List, Dict, Any
 import logging
 
@@ -8,8 +9,33 @@ logger = logging.getLogger(__name__)
 class PDFParser:
     """
     High-Fidelity Reading-Order PDF Parsing Service powered by PyMuPDF (fitz).
-    Extracts text block-by-block with physical sort=True to preserve tables, headings, and lists cleanly.
+    Automatically strips repeating header/footer noise, URL watermarks, author credits, and page numbers.
     """
+
+    @staticmethod
+    def _clean_text_noise(text: str) -> str:
+        """
+        Strips header/footer boilerplate, website watermarks, and author credits.
+        """
+        lines = text.splitlines()
+        clean_lines = []
+        for line in lines:
+            l = line.strip()
+            if not l:
+                continue
+            # Strip website URLs and download banners
+            if re.search(r'(weebly\.com|download now|http[s]?://|www\.|\.org|\.edu)', l, re.IGNORECASE):
+                continue
+            # Strip author credits and professor designations
+            if re.search(r'(collected\s*&\s*prepared\s*by|assoc\.\s*prof|m\.tech|miste|b\.tech,\s*eee)', l, re.IGNORECASE):
+                continue
+            # Strip standalone page number lines
+            if re.match(r'^\d{1,3}$', l):
+                continue
+            clean_lines.append(l)
+
+        # Preserve paragraph structure
+        return "\n".join(clean_lines)
 
     @staticmethod
     def _extract_page_text(page) -> str:
@@ -23,8 +49,9 @@ class PDFParser:
                 # b[4] is block text, b[6] is block type (0 for text)
                 if len(b) >= 5 and b[6] == 0:
                     b_text = b[4].strip()
-                    if b_text:
-                        text_parts.append(b_text)
+                    clean_b = PDFParser._clean_text_noise(b_text)
+                    if clean_b:
+                        text_parts.append(clean_b)
             
             if text_parts:
                 return "\n\n".join(text_parts)
@@ -32,7 +59,8 @@ class PDFParser:
             logger.warning(f"Blocks extraction failed: {e}. Falling back to default text sort.")
 
         raw_text = page.get_text("text", sort=True) or ""
-        return "\n\n".join([line.strip() for line in raw_text.splitlines() if line.strip()])
+        cleaned = PDFParser._clean_text_noise(raw_text)
+        return "\n\n".join([line.strip() for line in cleaned.splitlines() if line.strip()])
 
     @staticmethod
     def parse_pdf_file(file_path: str, filename: str) -> Dict[str, Any]:
