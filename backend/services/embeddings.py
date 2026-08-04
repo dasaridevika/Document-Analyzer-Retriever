@@ -159,9 +159,17 @@ class EmbeddingService:
     def _hash_embedding(text: str, dim: int = 1024) -> List[float]:
         """
         Generates a 1024-dimensional normalized n-gram feature hashing vector.
-        Matches BGE-Large dimensionality.
+        Matches BGE-Large dimensionality. Filters stop words to prevent matching noise dominance.
         """
-        words = text.lower().split()
+        stop_words = {
+            "what", "is", "the", "how", "to", "in", "of", "for", "a", "an", "and", "or", "are", 
+            "about", "explain", "why", "who", "whom", "which", "that", "this", "these", "those",
+            "it", "its", "they", "them", "their", "he", "him", "his", "she", "her", "we", "us", "our"
+        }
+        words = [w for w in text.lower().split() if w not in stop_words]
+        if not words:
+            words = text.lower().split()
+
         vector = [0.0] * dim
         
         for word in words:
@@ -170,7 +178,7 @@ class EmbeddingService:
             val = 1.0 if (h & 1) else -1.0
             vector[idx] += val
 
-        clean_str = text.lower()
+        clean_str = " ".join(words)
         for i in range(len(clean_str) - 2):
             bigram = clean_str[i:i+3]
             h = int(hashlib.md5(bigram.encode('utf-8')).hexdigest(), 16)

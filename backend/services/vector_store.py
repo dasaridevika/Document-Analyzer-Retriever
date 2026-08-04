@@ -347,7 +347,7 @@ class VectorStoreManager:
         for loc_idx in range(len(candidate_indices)):
             d_rank = dense_rank_map.get(loc_idx, 999)
             b_rank = bm25_rank_map.get(loc_idx, 999)
-            rrf = (1.0 / (k_rrf + d_rank)) + (0.5 / (k_rrf + b_rank))
+            rrf = (1.0 / (k_rrf + d_rank)) + (1.0 / (k_rrf + b_rank))
 
             doc_text_lower = sub_docs[loc_idx].lower()
             
