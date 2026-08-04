@@ -1,13 +1,50 @@
 /* Clean, Modern Light Purple UI Theme matching DocAnalyzer Design */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-html, body, [class*="css"] {
+html, body, .stApp {
     font-family: 'Inter', sans-serif;
-    color: #1e293b;
+    background-color: #f8f9fe !important;
+    color: #1e293b !important;
 }
 
-.stApp {
-    background-color: #f8f9fe;
+/* Headings */
+h1, h2, h3, h4, h5, h6, .doc-header-title, .card-title {
+    color: #0f172a !important;
+}
+
+/* Markdown Text */
+.stMarkdown p, .stMarkdown li, .stMarkdown span {
+    color: #1e293b !important;
+}
+
+/* Chat Message Content */
+[data-testid="stChatMessage"] p, 
+[data-testid="stChatMessage"] li, 
+[data-testid="stChatMessage"] span {
+    color: #0f172a !important;
+}
+
+/* Form Inputs and Text Areas */
+.stTextInput input, .stTextArea textarea, .stChatInput textarea {
+    color: #1e293b !important;
+    background-color: #ffffff !important;
+}
+
+.stTextInput label, .stTextArea label, .stSelectbox label {
+    color: #334155 !important;
+}
+
+/* Sidebar Text */
+[data-testid="stSidebar"] p, 
+[data-testid="stSidebar"] span, 
+[data-testid="stSidebar"] label, 
+[data-testid="stSidebar"] h1, 
+[data-testid="stSidebar"] h2, 
+[data-testid="stSidebar"] h3, 
+[data-testid="stSidebar"] h4, 
+[data-testid="stSidebar"] h5, 
+[data-testid="stSidebar"] h6 {
+    color: #0f172a !important;
 }
 
 /* Hide default Streamlit elements */
@@ -160,15 +197,14 @@ footer {visibility: hidden;}
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    background-color: #f1f5f9;
-    color: #4f46e5;
+    background-color: #f1f5f9 !important;
+    color: #4f46e5 !important;
     border: 1px solid #e2e8f0;
     padding: 4px 10px;
     border-radius: 6px;
     font-size: 0.78rem;
     font-weight: 500;
     margin-top: 10px;
-
 }
 
 /* Time Indicator */
