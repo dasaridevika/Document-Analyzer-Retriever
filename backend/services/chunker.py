@@ -3,8 +3,9 @@ from typing import List, Dict, Any
 
 class DocumentChunker:
     """
-    RAG Document Chunking Engine implementing sentence-level sliding window overlap
-    and header injection to preserve semantic context across chunk boundaries.
+    RAG Document Chunking Engine implementing short heading merging,
+    sentence-level sliding window overlap, and header injection to guarantee
+    that titles and body text paragraphs are never separated into isolated chunks.
     """
 
     def create_chunks(
@@ -40,10 +41,31 @@ class DocumentChunker:
             if not text:
                 continue
 
-            # Split on both double newlines and single line block breaks
-            paragraphs = re.split(r'\n\s*\n', text)
+            raw_paragraphs = [para.strip() for para in re.split(r'\n\s*\n', text) if para.strip()]
+            
+            # Merge short headings (< 120 chars) with subsequent body text paragraphs
+            merged_paragraphs = []
+            buffer = ""
 
-            for para in paragraphs:
+            for para in raw_paragraphs:
+                if buffer:
+                    buffer += "\n\n" + para
+                    if len(buffer) >= 120:
+                        merged_paragraphs.append(buffer)
+                        buffer = ""
+                else:
+                    if len(para) < 120:
+                        buffer = para
+                    else:
+                        merged_paragraphs.append(para)
+
+            if buffer:
+                if merged_paragraphs:
+                    merged_paragraphs[-1] += "\n\n" + buffer
+                else:
+                    merged_paragraphs.append(buffer)
+
+            for para in merged_paragraphs:
                 para_clean = para.strip()
                 if not para_clean:
                     continue

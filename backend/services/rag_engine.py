@@ -36,6 +36,7 @@ def _extract_text_from_llm_payload(data: Any) -> str:
 class RAGEngine:
     """
     Production-Grade Intent-Driven RAG Engine:
+    - Heading-Aware Chunk Context Stitching
     - Relative Score Filtering (Strictly isolates top-matching chunks)
     - Full Paragraph Text Extraction & Complete Explanations
     - Natural Language Synthesizer & Page Citation Engine
@@ -160,13 +161,26 @@ class RAGEngine:
                 "retrieved_count": 0
             }
 
-        # 3. Format Context
+        # 3. Format Context (With Heading-Body Context Stitching)
         context_blocks = []
         for i, chunk in enumerate(target_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
-            clean_chunk_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', chunk['text'])
+            clean_chunk_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', chunk['text']).strip()
+            
+            # If retrieved chunk text is short (< 150 chars), stitch adjacent chunks on same page if available
+            if len(clean_chunk_text) < 150:
+                c_idx = chunk["metadata"].get("chunk_index", 0)
+                adjacent = [
+                    self.vector_store.documents_store[j] for j, meta in enumerate(self.vector_store.metadata_store)
+                    if meta.get("filename") == doc_fname and meta.get("page_number") == page_num and meta.get("chunk_index") == c_idx + 1
+                ]
+                if adjacent:
+                    clean_adj = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', adjacent[0]).strip()
+                    clean_chunk_text += "\n\n" + clean_adj
+
             context_blocks.append(f"--- [Page {page_num} | Document: {doc_fname}] ---\n{clean_chunk_text}")
+
         combined_context = "\n\n".join(context_blocks)
 
         # 4. LLM Synthesis
@@ -299,14 +313,28 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: Full-Paragraph Content Synthesizer Fallback
+        # Priority 3: Full-Paragraph Content Synthesizer Fallback with Context Stitching
         top_chunks = retrieved_chunks[:3]
         response_sections = []
 
         for chunk in top_chunks:
             page = chunk["metadata"].get("page_number", "?")
+            doc_fname = chunk["metadata"].get("filename", "")
+            c_idx = chunk["metadata"].get("chunk_index", 0)
+            
             raw_text = chunk.get("raw_content", chunk["text"])
             body_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_text).strip()
+            
+            # Stitch next chunk if body text is short (< 150 chars)
+            if len(body_text) < 150:
+                adjacent = [
+                    self.vector_store.documents_store[j] for j, meta in enumerate(self.vector_store.metadata_store)
+                    if meta.get("filename") == doc_fname and meta.get("page_number") == page and meta.get("chunk_index") == c_idx + 1
+                ]
+                if adjacent:
+                    clean_adj = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', adjacent[0]).strip()
+                    body_text += "\n\n" + clean_adj
+
             if body_text and len(body_text) > 15:
                 response_sections.append(f"**From Page {page}:**\n{body_text}")
 
