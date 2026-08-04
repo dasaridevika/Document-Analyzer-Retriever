@@ -9,7 +9,8 @@ logger = logging.getLogger(__name__)
 class PDFParser:
     """
     High-Fidelity Reading-Order PDF Parsing Service powered by PyMuPDF (fitz).
-    Automatically strips repeating header/footer noise, URL watermarks, author credits, and page numbers.
+    Strips repeating header/footer noise, website watermarks, and author credits.
+    Filters out empty scanned image pages so dummy header chunks are never indexed.
     """
 
     @staticmethod
@@ -26,15 +27,14 @@ class PDFParser:
             # Strip website URLs and download banners
             if re.search(r'(weebly\.com|download now|http[s]?://|www\.|\.org|\.edu)', l, re.IGNORECASE):
                 continue
-            # Strip author credits and professor designations
-            if re.search(r'(collected\s*&\s*prepared\s*by|assoc\.\s*prof|m\.tech|miste|b\.tech,\s*eee)', l, re.IGNORECASE):
+            # Strip author credits, university headers, and designations
+            if re.search(r'(collected\s*&\s*prepared\s*by|assoc\.\s*prof|m\.tech|miste|b\.tech,\s*eee|iv\s*year\s*i\s*sem|gcet,\s*kadapa)', l, re.IGNORECASE):
                 continue
             # Strip standalone page number lines
             if re.match(r'^\d{1,3}$', l):
                 continue
             clean_lines.append(l)
 
-        # Preserve paragraph structure
         return "\n".join(clean_lines)
 
     @staticmethod
@@ -50,7 +50,7 @@ class PDFParser:
                 if len(b) >= 5 and b[6] == 0:
                     b_text = b[4].strip()
                     clean_b = PDFParser._clean_text_noise(b_text)
-                    if clean_b:
+                    if clean_b and len(clean_b) > 15:
                         text_parts.append(clean_b)
             
             if text_parts:
@@ -60,7 +60,8 @@ class PDFParser:
 
         raw_text = page.get_text("text", sort=True) or ""
         cleaned = PDFParser._clean_text_noise(raw_text)
-        return "\n\n".join([line.strip() for line in cleaned.splitlines() if line.strip()])
+        valid_lines = [line.strip() for line in cleaned.splitlines() if line.strip() and len(line.strip()) > 15]
+        return "\n\n".join(valid_lines)
 
     @staticmethod
     def parse_pdf_file(file_path: str, filename: str) -> Dict[str, Any]:
@@ -73,6 +74,11 @@ class PDFParser:
         for page_num in range(total_pages):
             page = doc[page_num]
             cleaned_text = PDFParser._extract_page_text(page)
+            
+            # Skip empty scanned pages that contain only header noise
+            if not cleaned_text or len(cleaned_text.strip()) < 30:
+                continue
+
             word_count = len(cleaned_text.split())
             total_word_count += word_count
 
@@ -116,6 +122,11 @@ class PDFParser:
         for page_num in range(total_pages):
             page = doc[page_num]
             cleaned_text = PDFParser._extract_page_text(page)
+
+            # Skip empty scanned pages that contain only header noise
+            if not cleaned_text or len(cleaned_text.strip()) < 30:
+                continue
+
             word_count = len(cleaned_text.split())
             total_word_count += word_count
 

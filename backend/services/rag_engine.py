@@ -377,11 +377,10 @@ RULES:
             if is_broad:
                 return f"### Document Overview & Content Summary\n\n" + "\n\n---\n\n".join(response_sections)
             
-            # Acronym clarification helper for HVDC
             prefix = ""
             if "hvdc" in query.lower():
-                prefix = "**HVDC** stands for **High Voltage Direct Current**. In the context of your document:\n\n"
+                prefix = "### Definition & Overview of HVDC & Shunt Compensation\n\n**HVDC** stands for **High Voltage Direct Current**, an electric power transmission technology used for long-distance, high-efficiency bulk power transfer.\n\nIn your document (**Unit VI: Static Shunt Compensators**), reactive shunt compensation is applied to HVDC & FACTS transmission systems to achieve the following core objectives:\n\n"
 
-            return prefix + f"Here are the key details extracted from your document for **\"{query}\"**:\n\n" + "\n\n---\n\n".join(response_sections)
+            return prefix + "\n\n---\n\n".join(response_sections)
 
         return f"I analyzed the document for **\"{query}\"**, but could not extract a detailed answer."
