@@ -30,7 +30,7 @@ class PersistentBM25Index:
         self.avg_doc_len = 0.0
 
     def add_document(self, chunk_id: str, text: str):
-        words = text.lower().split()
+        words = re.findall(r'\w+', text.lower())
         doc_len = len(words)
         self.doc_lengths[chunk_id] = doc_len
         self.total_chunks += 1
@@ -49,7 +49,12 @@ class PersistentBM25Index:
         self.avg_doc_len = sum(self.doc_lengths.values()) / max(1, self.total_chunks)
 
     def score_candidates(self, query: str, candidate_ids: List[str]) -> Dict[str, float]:
-        q_words = query.lower().split()
+        q_words = re.findall(r'\w+', query.lower())
+        stop_words = {
+            "what", "is", "the", "how", "does", "are", "there", "in", "for", "to", "a", "an", "and", "or",
+            "it", "given", "document", "explain", "summarise", "summarize", "about", "of", "with", "by", "from"
+        }
+        q_words = [w for w in q_words if w not in stop_words]
         scores: Dict[str, float] = {cid: 0.0 for cid in candidate_ids}
         
         for qw in q_words:

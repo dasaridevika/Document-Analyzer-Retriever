@@ -362,7 +362,7 @@ class ConversationResolver:
             return f"What is discussed on page {p_num}?"
 
         # History Fusion
-        if chat_history and len(query.split()) <= 5:
+        if chat_history and len(re.findall(r'\w+', query)) <= 5:
             user_msgs = [m["content"] for m in chat_history if m.get("role") == "user" and m.get("content", "").strip()]
             if user_msgs:
                 prev_q = user_msgs[-1].strip()
@@ -371,12 +371,22 @@ class ConversationResolver:
                 is_prev_summary = any(x in prev_q_lower for x in ["summarise", "summarize", "summary", "overview", "pdf about"])
                 if not is_prev_summary:
                     pronouns = {"he", "she", "it", "they", "him", "her", "them", "his", "their", "its", "this", "that", "these", "those", "himself", "herself", "itself"}
-                    words = set(lower_q.split())
+                    words = set(re.findall(r'\w+', lower_q))
                     has_pronouns = bool(words & pronouns)
-                    is_tiny_fragment = len(query.split()) <= 2
+                    is_tiny_fragment = len(re.findall(r'\w+', query)) <= 2
+                    
+                    question_words = {"what", "how", "why", "who", "where", "define", "explain", "describe", "compare", "versus", "vs", "list"}
+                    is_complete_question = bool(words & question_words)
+                    
+                    should_fuse = False
+                    if has_pronouns:
+                        should_fuse = True
+                    elif is_tiny_fragment and not is_complete_question:
+                        should_fuse = True
+                        
                     is_subject_change = ("hvdc" in prev_q_lower and "shunt" in lower_q) or ("shunt" in prev_q_lower and "hvdc" in lower_q)
                     
-                    if (has_pronouns or is_tiny_fragment) and not is_subject_change:
+                    if should_fuse and not is_subject_change:
                         if prev_q and prev_q_lower != lower_q:
                             return f"{prev_q} - {query}"
 
@@ -508,16 +518,16 @@ class QueryRewriter:
             variations.append(f"Comparison of {subj1} and {intent_obj.secondary_subject}")
         elif intent_obj.intent == "summary":
             variations.append("Executive summary of document main topics and objectives")
-            variations.append("Overview of reactive shunt compensation and transmission system principles")
+            variations.append(f"Overview of {subj1} main themes and general principles")
         elif intent_obj.intent == "definition":
             variations.append(f"Define {subj1}")
             variations.append(f"What is the definition and purpose of {subj1}")
         elif intent_obj.intent == "objectives":
             variations.append(f"Key objectives and aims of {subj1}")
-            variations.append(f"Why is {subj1} used in electrical engineering")
+            variations.append(f"Why is {subj1} used and what does it accomplish")
         elif intent_obj.intent in ["mechanism", "explanation"]:
             variations.append(f"How does {subj1} work step by step")
-            variations.append(f"Voltage regulation and power transfer mechanism of {subj1}")
+            variations.append(f"Operation, function, and implementation mechanism of {subj1}")
         else:
             variations.append(f"Details on {subj1}")
             variations.append(f"Overview of {subj1}")
@@ -704,7 +714,7 @@ class GroundedCitationVerifier:
                     def_keywords = ["defined as", "refers to", "definition", "means", "is a", "is the", "constitutes", "stands for", "is used to", "changes the", "characterized by"]
                     if any(k in s_lower for k in def_keywords):
                         intent_bonus += 0.35
-                    words_list = s_lower.split()
+                    words_list = re.findall(r'\w+', s_lower)
                     if words_list and words_list[0] in match_words:
                         intent_bonus += 0.15
                         
