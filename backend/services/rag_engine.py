@@ -36,9 +36,9 @@ def _extract_text_from_llm_payload(data: Any) -> str:
 class RAGEngine:
     """
     Production-Grade Intent-Driven RAG Engine:
-    - Strict Query Scope Isolation (Answers ONLY what was asked)
-    - Acronym & Technical Concept Expansion
-    - Noise-Stripped Chunk Verification
+    - Intent & Classification Synonym Expansion (Types, Categories, Kinds)
+    - Strict Query Scope Isolation
+    - Context Deduplication
     - Natural Language Synthesizer & Page Citation Engine
     """
 
@@ -65,7 +65,7 @@ class RAGEngine:
         if not chat_history:
             return query
         
-        is_follow_up = len(query.split()) <= 5 or any(p in query.lower() for p in ["exact number", "give me", "how many", "more details", "which one", "why"])
+        is_follow_up = len(query.split()) <= 6 or any(p in query.lower() for p in ["exact number", "give me", "how many", "types", "more details", "which one", "why"])
         if not is_follow_up:
             return query
 
@@ -86,6 +86,9 @@ class RAGEngine:
         lower_q = query.lower()
 
         synonym_map = {
+            "types": ["categories", "classification", "kinds", "varieties", "forms", "series", "shunt", "methods"],
+            "types of": ["categories", "classification", "kinds of", "series compensation", "shunt compensation", "reactors", "capacitors"],
+            "how many types": ["types of", "categories", "classification", "kinds", "series", "shunt", "list of types"],
             "hvdc": ["high voltage direct current", "hvdc transmission", "power transmission"],
             "facts": ["flexible ac transmission systems", "static shunt compensator"],
             "define": ["definition", "concept", "meaning", "what is", "principle", "explanation"],
@@ -106,7 +109,7 @@ class RAGEngine:
                 added_terms.extend(terms)
 
         if added_terms:
-            expanded_str = query + " " + " ".join(added_terms[:8])
+            expanded_str = query + " " + " ".join(added_terms[:10])
             expanded.append(expanded_str)
 
         return expanded
@@ -162,10 +165,14 @@ class RAGEngine:
 
         # 2. Score Filtering & Empty Noise Chunk Filter
         valid_retrieved = []
+        seen_texts = set()
+
         for c in all_retrieved:
             raw_t = c.get("raw_content", c["text"])
             clean_t = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_t).strip()
-            if len(clean_t) > 35:
+            # Ignore empty, duplicate, or header-only noise chunks
+            if len(clean_t) > 35 and clean_t not in seen_texts:
+                seen_texts.add(clean_t)
                 valid_retrieved.append(c)
 
         if not is_broad and valid_retrieved:
@@ -302,8 +309,8 @@ Answer ONLY the specific query asked by the user: "{query}".
 
 RULES:
 1. Focus SPECIFICALLY and ONLY on answering "{query}".
-2. Do NOT mention, summarize, or bring up unrequested topics present in the document context.
-3. Provide a clear, direct, and complete definition or explanation for "{query}".
+2. If asking for types, categories, or classifications, list and explain each type clearly using numbered or bulleted lists.
+3. Do NOT repeat identical text blocks.
 4. Cite page numbers naturally like [Page X]."""
 
         messages = [
@@ -348,11 +355,11 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: Strict Query-Isolated Content Synthesizer Fallback
-        top_chunks = retrieved_chunks[:3]
+        # Priority 3: Query-Isolated Content Synthesizer Fallback with Deduplication
         response_sections = []
+        seen_texts = set()
 
-        for chunk in top_chunks:
+        for chunk in retrieved_chunks:
             page = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "")
             c_idx = chunk["metadata"].get("chunk_index", 0)
@@ -369,12 +376,18 @@ RULES:
                     clean_adj = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', adjacent[0]).strip()
                     body_text += "\n\n" + clean_adj
 
-            if body_text and len(body_text) > 30:
+            if body_text and len(body_text) > 30 and body_text not in seen_texts:
+                seen_texts.add(body_text)
                 response_sections.append(f"**From Page {page}:**\n{body_text}")
 
         if response_sections:
             if is_broad:
                 return f"### Document Overview & Content Summary\n\n" + "\n\n---\n\n".join(response_sections)
+            
+            # Heading customization for "types" or "categories"
+            if any(w in query.lower() for w in ["types", "categories", "kinds", "how many types"]):
+                return f"### Types & Classification Extracted for **\"{query}\"**:\n\n" + "\n\n---\n\n".join(response_sections)
+
             return "\n\n---\n\n".join(response_sections)
 
         return f"I analyzed the document for **\"{query}\"**, but could not extract a detailed answer."
