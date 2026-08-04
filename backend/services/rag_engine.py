@@ -79,6 +79,10 @@ class RAGTrace:
     cache_hit: bool = False
     failure_stage: Optional[str] = None
     failure_reason: Optional[str] = None
+    context_recall: float = 0.0
+    answer_faithfulness: float = 0.0
+    citation_correctness: float = 0.0
+    response_latency_ms: float = 0.0
 
 
 # ============================================================================
@@ -543,7 +547,10 @@ class GroundedCitationVerifier:
             }, False, "No target chunks retrieved"
 
         if not structured_json or not structured_json.get("answerable", True):
-            return GroundedCitationVerifier._fallback_universal_extractive(query, target_chunks, intent_obj)
+            res_dict, valid, msg = GroundedCitationVerifier._fallback_universal_extractive(query, target_chunks, intent_obj)
+            res_dict["answer_faithfulness"] = 1.0
+            res_dict["citation_correctness"] = 1.0
+            return res_dict, valid, msg
 
         raw_definition = structured_json.get("definition", "").strip()
         raw_explanation = structured_json.get("explanation", "").strip()
@@ -565,27 +572,41 @@ class GroundedCitationVerifier:
         seen_quotes: Set[str] = set()
         verified_evidence_items: List[str] = []
         valid_citations = True
+        
+        correct_citations = 0
+        total_citations = len(evidence_list)
 
         for cite in evidence_list:
             cid = cite.get("chunk_id") or (cite.get("supporting_chunk_ids", [None])[0] if cite.get("supporting_chunk_ids") else None)
             page = cite.get("page") or (cite.get("page_numbers", [1])[0] if cite.get("page_numbers") else 1)
             quote = (cite.get("quote") or cite.get("support_quote", "")).strip()
 
+            is_correct = True
             if cid and cid not in chunk_map:
                 valid_citations = False
+                is_correct = False
 
             if cid in chunk_map and page and page != chunk_map[cid]["metadata"].get("page_number"):
                 valid_citations = False
+                is_correct = False
 
             if quote and len(quote) > 8:
                 quote_clean = re.sub(r'\s+', ' ', quote.lower())
                 target_text_clean = re.sub(r'\s+', ' ', chunk_text_map.get(cid, all_text_combined).lower())
                 if quote_clean not in target_text_clean:
                     valid_citations = False
+                    is_correct = False
                 else:
                     if quote not in seen_quotes:
                         seen_quotes.add(quote)
                         verified_evidence_items.append(f"- Page {page or 1}, chunk {cid or 'c0'}: “{quote}”")
+            
+            if is_correct:
+                correct_citations += 1
+
+        citation_correctness = round(correct_citations / max(1, total_citations), 2) if total_citations > 0 else 1.0
+        verified_claims = len(verified_evidence_items)
+        answer_faithfulness = round(verified_claims / max(1, total_citations), 2) if total_citations > 0 else (1.0 if raw_answer or raw_definition else 0.0)
 
         md_parts = []
         if raw_definition:
@@ -603,7 +624,9 @@ class GroundedCitationVerifier:
         return {
             "answer": final_md,
             "verified_quotes": list(seen_quotes),
-            "confidence": confidence
+            "confidence": confidence,
+            "answer_faithfulness": answer_faithfulness,
+            "citation_correctness": citation_correctness
         }, valid_citations, "Verification complete"
 
     @staticmethod
@@ -994,6 +1017,12 @@ class RAGEngine:
         )
         trace.confidence_score = confidence
         trace.execution_time_ms = round((time.time() - start_time) * 1000, 2)
+        
+        # Calculate RAG evaluation metrics
+        trace.context_recall = self._compute_context_recall(resolved_q, final_chunks)
+        trace.answer_faithfulness = verified_res.get("answer_faithfulness", 0.0)
+        trace.citation_correctness = verified_res.get("citation_correctness", 0.0)
+        trace.response_latency_ms = trace.execution_time_ms
 
         sources = [
             {
@@ -1043,6 +1072,22 @@ class RAGEngine:
             user_id_filter=user_id,
             min_score=0.15
         )
+
+    @staticmethod
+    def _compute_context_recall(query: str, retrieved_chunks: List[Dict[str, Any]]) -> float:
+        lower_q = query.lower()
+        stop_words = {
+            "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
+            "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
+            "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page"
+        }
+        q_words = set(re.findall(r'\w+', lower_q)) - stop_words
+        if not q_words:
+            return 1.0
+        retrieved_text = " ".join([c.get("raw_content", c.get("text", "")) for c in retrieved_chunks]).lower()
+        retrieved_words = set(re.findall(r'\w+', retrieved_text))
+        intersection = q_words & retrieved_words
+        return round(len(intersection) / len(q_words), 2)
 
     @staticmethod
     def _detect_prompt_injection(query: str) -> bool:
@@ -1135,5 +1180,9 @@ class RAGEngine:
             "execution_time_ms": trace.execution_time_ms,
             "cache_hit": trace.cache_hit,
             "failure_stage": trace.failure_stage,
-            "failure_reason": trace.failure_reason
+            "failure_reason": trace.failure_reason,
+            "context_recall": trace.context_recall,
+            "answer_faithfulness": trace.answer_faithfulness,
+            "citation_correctness": trace.citation_correctness,
+            "response_latency_ms": trace.response_latency_ms
         }

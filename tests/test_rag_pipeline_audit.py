@@ -323,5 +323,17 @@ class TestRAGPipelineAudit(unittest.TestCase):
         for item in res:
             self.assertEqual(item["metadata"]["document_id"], "doc_spec")
 
+    def test_15_rag_evaluation_metrics(self):
+        res = self.rag.answer_query("test query", filename="Spec.pdf", document_id="doc_spec")
+        trace = res.get("rag_trace", {})
+        self.assertIn("context_recall", trace)
+        self.assertIn("answer_faithfulness", trace)
+        self.assertIn("citation_correctness", trace)
+        self.assertIn("response_latency_ms", trace)
+        self.assertGreaterEqual(trace["context_recall"], 0.0)
+        self.assertGreaterEqual(trace["answer_faithfulness"], 0.0)
+        self.assertGreaterEqual(trace["citation_correctness"], 0.0)
+        self.assertGreaterEqual(trace["response_latency_ms"], 0.0)
+
 if __name__ == "__main__":
     unittest.main()
