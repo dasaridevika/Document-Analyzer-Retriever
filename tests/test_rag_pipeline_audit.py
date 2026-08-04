@@ -282,5 +282,14 @@ class TestRAGPipelineAudit(unittest.TestCase):
         self.assertEqual(resolved, "where is he from")
         self.assertNotEqual(intent_obj.intent, "summary")
 
+    def test_12_history_fusion_subject_change(self):
+        chat_history = [
+            {"role": "user", "content": "objectives of hvdc"},
+            {"role": "assistant", "content": "The objectives of HVDC are..."}
+        ]
+        resolved, intent_obj = QueryRewriter.rewrite_query("objectives of shunt compensation", chat_history)
+        self.assertEqual(resolved, "objectives of shunt compensation")
+        self.assertEqual(intent_obj.intent, "objectives")
+
 if __name__ == "__main__":
     unittest.main()

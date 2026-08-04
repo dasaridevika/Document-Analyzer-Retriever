@@ -260,11 +260,18 @@ class ConversationResolver:
             if user_msgs:
                 prev_q = user_msgs[-1].strip()
                 prev_q_lower = prev_q.lower()
-                # Skip fusion if the previous query was a summary/overview command
+                # Do not fuse if previous query was a summary/overview query
                 is_prev_summary = any(x in prev_q_lower for x in ["summarise", "summarize", "summary", "overview", "pdf about"])
                 if not is_prev_summary:
-                    if prev_q and prev_q_lower != lower_q:
-                        return f"{prev_q} - {query}"
+                    pronouns = {"he", "she", "it", "they", "him", "her", "them", "his", "their", "its", "this", "that", "these", "those", "himself", "herself", "itself"}
+                    words = set(lower_q.split())
+                    has_pronouns = bool(words & pronouns)
+                    is_tiny_fragment = len(query.split()) <= 2
+                    is_subject_change = ("hvdc" in prev_q_lower and "shunt" in lower_q) or ("shunt" in prev_q_lower and "hvdc" in lower_q)
+                    
+                    if (has_pronouns or is_tiny_fragment) and not is_subject_change:
+                        if prev_q and prev_q_lower != lower_q:
+                            return f"{prev_q} - {query}"
 
         return clean_q
 
