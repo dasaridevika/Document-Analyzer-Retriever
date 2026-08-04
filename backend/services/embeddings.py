@@ -58,25 +58,31 @@ class EmbeddingService:
                     data = response.json()
                     vectors = data.get("data") or data.get("result", {}).get("data")
                     if isinstance(vectors, list) and len(vectors) == len(texts):
+                        logger.info(f"Successfully generated {len(vectors)} embeddings via Cloudflare Worker.")
                         return self.validate_vectors(vectors)
                 elif response.status_code in [401, 403]:
                     logger.warning(f"Cloudflare Worker embedding endpoint returned auth error HTTP {response.status_code}.")
                 elif response.status_code == 429:
                     logger.warning("Cloudflare Worker embedding endpoint rate-limited (HTTP 429).")
+                else:
+                    logger.warning(f"Cloudflare Worker '{w_url}' returned HTTP {response.status_code}: {response.text}")
             except requests.Timeout:
                 logger.warning(f"Cloudflare Worker embedding call to '{w_url}' timed out.")
             except Exception as e:
-                logger.warning(f"Cloudflare Worker embedding call failed: {type(e).__name__}")
+                logger.warning(f"Cloudflare Worker embedding call failed on '{w_url}': {e}")
 
         # Priority 2: Direct Cloudflare REST API
-        if self.account_id and self.api_token and "placeholder" not in self.account_id:
+        if self.account_id and self.api_token and "placeholder" not in str(self.account_id).lower():
             try:
                 vectors = self._generate_cloudflare_rest_embeddings(texts)
+                logger.info(f"Successfully generated {len(vectors)} embeddings via Direct Cloudflare REST API.")
                 return self.validate_vectors(vectors)
             except requests.Timeout:
                 logger.warning("Direct Cloudflare REST API embedding call timed out.")
             except Exception as e:
-                logger.warning(f"Direct Cloudflare REST API embedding failed: {type(e).__name__}")
+                logger.warning(f"Direct Cloudflare REST API embedding failed: {e}")
+        else:
+            logger.warning("Direct Cloudflare REST API skipped: Missing or placeholder CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN.")
 
         # Priority 3: Guaranteed 1024-dim Deterministic Hashing Fallback
         logger.info("Using 1024-dimension Feature Hashing vector fallback...")
@@ -100,14 +106,16 @@ class EmbeddingService:
             response = requests.post(url, headers=headers, json=payload, timeout=30)
             if response.status_code == 401:
                 raise PermissionError("Cloudflare REST API 401 Unauthorized: Invalid API Token.")
+            if response.status_code == 404:
+                raise ValueError(f"Cloudflare REST API 404 Not Found: Account ID '{self.account_id}' or Model '{self.model_name}' invalid.")
             if response.status_code == 429:
                 raise RuntimeError("Cloudflare REST API 429 Rate Limit Exceeded.")
             if response.status_code != 200:
-                raise RuntimeError(f"Cloudflare REST API HTTP {response.status_code}")
+                raise RuntimeError(f"Cloudflare REST API HTTP {response.status_code}: {response.text}")
 
             data = response.json()
             if not data.get("success", False):
-                raise RuntimeError("Cloudflare REST API returned unsuccessful status.")
+                raise RuntimeError(f"Cloudflare REST API returned unsuccessful status: {data.get('errors')}")
 
             result = data.get("result", {})
             vectors = result.get("data", [])
