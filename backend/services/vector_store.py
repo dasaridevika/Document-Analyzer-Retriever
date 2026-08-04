@@ -66,9 +66,52 @@ def _jaccard_similarity(text1: str, text2: str) -> float:
     return len(w1 & w2) / len(w1 | w2)
 
 
+def maximum_marginal_relevance(
+    query_vector: np.ndarray,
+    doc_vectors: np.ndarray,
+    lambda_param: float = 0.7,
+    top_k: int = 8
+) -> List[int]:
+    """
+    Computes Maximum Marginal Relevance (MMR) to balance relevance with diversity (Saraswathi Lakshman Guide).
+    """
+    if len(doc_vectors) == 0:
+        return []
+
+    # Relevance to query
+    relevance = np.dot(doc_vectors, query_vector.T).flatten()
+    selected_indices: List[int] = []
+    unselected_indices = list(range(len(doc_vectors)))
+
+    while len(selected_indices) < min(top_k, len(doc_vectors)):
+        best_idx = -1
+        best_mmr = -1e9
+
+        for idx in unselected_indices:
+            rel_score = relevance[idx]
+            if not selected_indices:
+                redundancy = 0.0
+            else:
+                selected_vecs = doc_vectors[selected_indices]
+                redundancy = max(np.dot(selected_vecs, doc_vectors[idx].T).flatten())
+
+            mmr_score = lambda_param * rel_score - (1.0 - lambda_param) * redundancy
+            if mmr_score > best_mmr:
+                best_mmr = mmr_score
+                best_idx = idx
+
+        if best_idx != -1:
+            selected_indices.append(best_idx)
+            unselected_indices.remove(best_idx)
+        else:
+            break
+
+    return selected_indices
+
+
 class VectorStoreManager:
     """
-    Production-Grade Vector Store Engine with Intent Reranking & Near-Duplicate Removal.
+    Production-Grade Vector Store Engine with Hybrid Search, MMR Reranking & Jaccard Deduplication.
     """
 
     def __init__(self, embedding_dim: int = 1024, embedding_model: str = "@cf/baai/bge-large-en-v1.5"):
@@ -211,7 +254,8 @@ class VectorStoreManager:
         document_id_filter: str = None,
         session_id_filter: str = None,
         user_id_filter: str = None,
-        min_score: float = 0.15
+        min_score: float = 0.15,
+        use_mmr: bool = True
     ) -> List[Dict[str, Any]]:
         if not self.ids_store or self.vector_matrix is None:
             return []
@@ -251,7 +295,7 @@ class VectorStoreManager:
             bm25_scores = bm25.get_scores(raw_query)
             bm25_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(bm25_scores)[::-1])}
 
-        # 3. Intent-Driven Reranker
+        # 3. Intent-Driven RRF Scoring
         rrf_scores = []
         k_rrf = 60
         for loc_idx in range(len(candidate_indices)):
@@ -259,7 +303,6 @@ class VectorStoreManager:
             b_rank = bm25_rank_map.get(loc_idx, 999)
             rrf = (1.0 / (k_rrf + d_rank)) + (0.5 / (k_rrf + b_rank))
 
-            # Intent Bonus Reranker
             doc_text_lower = sub_docs[loc_idx].lower()
             intent_bonus = 0.0
             if intent_type == "definition":
@@ -268,7 +311,7 @@ class VectorStoreManager:
             elif intent_type == "objectives":
                 if any(w in doc_text_lower for w in ["objectives of", "ultimate objective", "minimize line overvoltage", "maintain voltage levels"]):
                     intent_bonus += 0.30
-            elif intent_type == "mechanism":
+            elif intent_type in ["mechanism", "explanation"]:
                 if any(w in doc_text_lower for w in ["segments the transmission line", "midpoint voltage regulation", "two independent parts", "voltage stability"]):
                     intent_bonus += 0.30
 
@@ -277,11 +320,19 @@ class VectorStoreManager:
 
         rrf_scores.sort(key=lambda x: x[0], reverse=True)
 
+        # 4. Optional Maximum Marginal Relevance (MMR) Reranking for Diversity
+        if use_mmr and len(rrf_scores) > top_k:
+            candidate_vecs = np.array([sub_matrix[loc_idx] for _, loc_idx, _ in rrf_scores[:top_k * 2]])
+            mmr_sel = maximum_marginal_relevance(norm_query[0], candidate_vecs, lambda_param=0.75, top_k=top_k)
+            final_ordered = [rrf_scores[idx] for idx in mmr_sel]
+        else:
+            final_ordered = rrf_scores[:top_k]
+
         retrieved_chunks = []
         page_counts: Dict[int, int] = {}
         selected_texts = []
 
-        for rerank_score, loc_idx, d_score in rrf_scores:
+        for rerank_score, loc_idx, d_score in final_ordered:
             if d_score < min_score and len(retrieved_chunks) >= 3:
                 continue
 
@@ -290,11 +341,9 @@ class VectorStoreManager:
             meta = self.metadata_store[orig_idx]
             p_num = meta.get("page_number", 1)
 
-            # Cap chunks per page
             if page_counts.get(p_num, 0) >= MAX_CHUNKS_PER_PAGE:
                 continue
 
-            # Deduplication & Near-Duplicate Removal (>70% Jaccard)
             if any(_jaccard_similarity(cand_text, prev_t) > 0.70 for prev_t in selected_texts):
                 continue
 
