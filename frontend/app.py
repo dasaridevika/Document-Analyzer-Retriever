@@ -89,7 +89,7 @@ if "style_prompt" not in st.session_state:
 if "active_nav" not in st.session_state:
     st.session_state.active_nav = "💬 Chat"
 if "top_k" not in st.session_state:
-    st.session_state.top_k = 8
+    st.session_state.top_k = 12
 if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
 
@@ -259,7 +259,6 @@ with main_col:
         else:
             st.warning("⚠️ No document selected. Upload a PDF or select one from 'My Storage Bucket Files'.")
 
-        # Extraction Quality Report Warning Banner
         if st.session_state.extraction_report:
             rep = st.session_state.extraction_report
             if rep.get("extraction_warnings"):
@@ -275,7 +274,7 @@ with main_col:
                     role = msg["role"]
                     content = msg["content"]
                     sources = msg.get("sources", [])
-                    verified_quotes = msg.get("verified_quotes", [])
+                    rag_trace = msg.get("rag_trace")
 
                     if role == "user":
                         with st.chat_message("user", avatar="👤"):
@@ -289,6 +288,11 @@ with main_col:
                                     for s in sources[:4]
                                 ])
                                 st.markdown(f"<div style='margin-top:10px;'>{sources_html}</div>", unsafe_allow_html=True)
+
+                            # Developer Debug RAG Trace Panel (Only visible when DEBUG_RAG=true)
+                            if rag_trace:
+                                with st.expander("🛠️ Developer RAG Debug Trace", expanded=False):
+                                    st.json(rag_trace)
 
         user_input = st.chat_input("Ask a question about your document...")
 
@@ -306,7 +310,7 @@ with main_col:
                     "filename": st.session_state.current_filename,
                     "system_prompt": st.session_state.style_prompt,
                     "top_k": st.session_state.top_k,
-                    "temperature": 0.1
+                    "temperature": 0.0
                 }
                 resp = requests.post(f"{b_url}/api/chat", json=chat_payload, timeout=90)
                 if resp.status_code == 200:
@@ -316,6 +320,7 @@ with main_col:
                         "content": data["answer"],
                         "sources": data.get("sources", []),
                         "verified_quotes": data.get("verified_quotes", []),
+                        "rag_trace": data.get("rag_trace"),
                         "timestamp": datetime.datetime.now().strftime("%I:%M %p")
                     })
                 else:

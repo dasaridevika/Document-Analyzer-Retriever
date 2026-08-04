@@ -13,7 +13,6 @@ except Exception:
 def count_tokens(text: str) -> int:
     if encoding:
         return len(encoding.encode(text))
-    # Approximation: ~4 chars per token
     return max(1, len(text) // 4)
 
 class DocumentChunker:
@@ -21,7 +20,7 @@ class DocumentChunker:
     Production Token-Aware Contextual Chunking Engine.
     - Token counting via tiktoken
     - Heading, list, code block, and table structure preservation
-    - Standalone Chunk Metadata Prefixing
+    - Standalone Chunk Metadata Prefixing (Document, Document ID, Page, Section, Chunk ID)
     - Chunk Deduplication
     """
 
@@ -90,11 +89,8 @@ class DocumentChunker:
                 continue
 
             section_title = DocumentChunker._extract_section_title(text)
-
-            # Preserve paragraphs, tables, lists, and code blocks
             raw_paragraphs = [para.strip() for para in re.split(r'\n\s*\n', text) if para.strip()]
             
-            # Merge short headings (< 30 tokens) with subsequent body text
             merged_paragraphs = []
             buffer = ""
 
@@ -134,14 +130,17 @@ class DocumentChunker:
                         continue
                     seen_texts.add(sc_clean)
 
+                    cid = f"{doc_id}_c{chunk_index}"
+
                     formatted_chunk_text = (
                         f"Document: {filename}\n"
+                        f"Document ID: {doc_id}\n"
                         f"Page: {page_num}\n"
-                        f"Section: {section_title}\n\n"
+                        f"Section: {section_title}\n"
+                        f"Chunk ID: {cid}\n\n"
                         f"Content:\n{sc_clean}"
                     )
 
-                    cid = f"{doc_id}_c{chunk_index}"
                     chunks.append({
                         "chunk_id": cid,
                         "chunk_index": chunk_index,
@@ -187,7 +186,6 @@ class DocumentChunker:
                 if curr_sentences:
                     result.append(" ".join(curr_sentences))
 
-                # Token sliding window overlap
                 overlap_sentences = []
                 overlap_t = 0
                 for prev_s in reversed(curr_sentences):

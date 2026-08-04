@@ -5,6 +5,7 @@ import hashlib
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+import re
 
 BASE_ROOT = Path(__file__).resolve().parent.parent
 if str(BASE_ROOT) not in sys.path:
@@ -19,7 +20,8 @@ from backend.config import (
     DATA_DIR,
     MAX_UPLOAD_SIZE_BYTES,
     MAX_PDF_PAGE_COUNT,
-    ALLOWED_FILE_EXTENSIONS
+    ALLOWED_FILE_EXTENSIONS,
+    DEBUG_RAG
 )
 from backend.services.pdf_parser import PDFParser
 from backend.services.chunker import DocumentChunker
@@ -33,7 +35,7 @@ from backend.services.auth_firebase import FirebaseAuthService
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DocAnalyzerBackend")
 
-app = FastAPI(title="DocAnalyzer Enterprise RAG API", version="3.0.0")
+app = FastAPI(title="DocAnalyzer Enterprise RAG API", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,20 +71,15 @@ class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1)
     filename: Optional[str] = None
     system_prompt: Optional[str] = None
-    top_k: int = 8
-    temperature: float = 0.1
+    top_k: int = 12
+    temperature: float = 0.0
 
 class VerifyAuthRequest(BaseModel):
     token_or_email: str
 
 def sanitize_filename(name: str) -> str:
-    """
-    Prevents Path Traversal attacks.
-    """
     clean_name = Path(name).name
     return re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_name)
-
-import re
 
 @app.get("/api/health")
 def health_check():
@@ -90,8 +87,9 @@ def health_check():
     return {
         "status": "online",
         "service": "DocAnalyzer Enterprise RAG API",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "vector_stats": stats,
+        "debug_rag_enabled": DEBUG_RAG,
         "bucket_name": storage_bucket.bucket_name
     }
 
@@ -119,18 +117,15 @@ async def upload_document(
 
     content = await file.read()
 
-    # 1. Size Validation
     if len(content) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(status_code=400, detail=f"File exceeds maximum upload size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB.")
 
-    # 2. Magic Header Bytes PDF Validation
     if not content.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Corrupted file: Missing valid PDF header signature.")
 
     clean_user_id = user_id.strip().lower() if user_id else "anonymous_user"
     doc_id = f"doc_{hashlib.sha256(content).hexdigest()[:16]}"
 
-    # Save to Storage Bucket
     bucket_result = storage_bucket.save_file(
         filename=safe_name,
         content=content,
@@ -138,11 +133,9 @@ async def upload_document(
         content_type="application/pdf"
     )
 
-    # Fast PDF Ingestion & Extraction Quality Analysis
     parse_result = PDFParser.parse_pdf_bytes(content, safe_name)
     report = parse_result["extraction_report"]
 
-    # 3. Maximum Page Count Validation
     if report["total_pages"] > MAX_PDF_PAGE_COUNT:
         raise HTTPException(status_code=400, detail=f"PDF page count ({report['total_pages']}) exceeds maximum limit of {MAX_PDF_PAGE_COUNT} pages.")
 
@@ -167,7 +160,6 @@ def process_document(req: ProcessRequest):
     doc_id = req.document_id or f"doc_{hashlib.sha256(pdf_bytes).hexdigest()[:16]}"
     sess_id = req.session_id or f"sess_{int(time.time())}"
 
-    # Re-upload/Replacement: Remove existing chunks for clean indexing
     vector_store.clear_document(filename=safe_name, document_id=doc_id)
 
     parse_result = PDFParser.parse_pdf_bytes(pdf_bytes, safe_name)
@@ -213,7 +205,6 @@ def chat_query(req: ChatRequest):
     session_id = req.session_id or f"sess_{int(time.time())}"
     safe_name = sanitize_filename(req.filename) if req.filename else None
 
-    # Fetch previous session messages for conversational reference resolution
     recent_messages = history_store.get_messages(session_id=session_id)
 
     history_store.create_session(
@@ -225,19 +216,18 @@ def chat_query(req: ChatRequest):
     )
     history_store.add_message(session_id=session_id, role="user", content=req.query, document_id=req.document_id or "")
 
-    # Grounded RAG Generation
     rag_result = rag_engine.answer_query(
         query=req.query,
         filename=safe_name,
         document_id=req.document_id,
         session_id=session_id,
+        user_id=clean_user_id,
         system_prompt=req.system_prompt,
         top_k=req.top_k,
         temperature=req.temperature,
         chat_history=recent_messages
     )
 
-    # Record Untrusted Assistant Message & Evidence Quotes
     history_store.add_message(
         session_id=session_id,
         role="assistant",
@@ -248,7 +238,7 @@ def chat_query(req: ChatRequest):
         is_untrusted_assistant=True
     )
 
-    return {
+    res = {
         "session_id": session_id,
         "user_id": clean_user_id,
         "document_id": req.document_id,
@@ -258,6 +248,11 @@ def chat_query(req: ChatRequest):
         "confidence": rag_result.get("confidence", 0.0),
         "retrieved_count": rag_result["retrieved_count"]
     }
+
+    if DEBUG_RAG and "rag_trace" in rag_result:
+        res["rag_trace"] = rag_result["rag_trace"]
+
+    return res
 
 @app.get("/api/bucket/files")
 def list_bucket_files(user_id: str):

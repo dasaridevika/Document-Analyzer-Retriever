@@ -5,7 +5,7 @@ import math
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from backend.config import VECTOR_DB_DIR
+from backend.config import VECTOR_DB_DIR, MAX_CHUNKS_PER_PAGE, DENSE_TOP_K, KEYWORD_TOP_K
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +59,7 @@ class BM25Scorer:
 
 class VectorStoreManager:
     """
-    Production-Grade Vector Store Engine.
-    - Strict Document ID & Session ID Metadata Filtering
-    - Model & Dimension Consistency Enforcement
-    - BM25 + BGE Dense Hybrid RRF Search
-    - Initial Pages Target Retrieval (Course Structure & TOC)
-    - Atomic Document Replacement & Neighbor Chunk Expansion
+    Production-Grade Vector Store Engine with Strict Metadata Filtering & Page Frequency Cap.
     """
 
     def __init__(self, embedding_dim: int = 1024, embedding_model: str = "@cf/baai/bge-large-en-v1.5"):
@@ -184,9 +179,6 @@ class VectorStoreManager:
         self._save_persistent_faiss()
 
     def get_first_pages_chunks(self, filename: str = None, document_id: str = None, max_pages: int = 5) -> List[Dict[str, Any]]:
-        """
-        Retrieves all chunks from the first N pages (Pages 1 to max_pages) for syllabus & course structure queries.
-        """
         first_chunks = []
         for i, meta in enumerate(self.metadata_store):
             if (not document_id or meta.get("document_id") == document_id) and \
@@ -204,12 +196,17 @@ class VectorStoreManager:
         self,
         query_embedding: List[float],
         raw_query: str = "",
-        top_k: int = 8,
+        top_k: int = 12,
         filename_filter: str = None,
         document_id_filter: str = None,
         session_id_filter: str = None,
+        user_id_filter: str = None,
         min_score: float = 0.15
     ) -> List[Dict[str, Any]]:
+        """
+        Step 4 Requirement: Every retrieval request MUST filter by active document_id (and session_id/user_id if provided).
+        Step 6 Requirement: Apply MAX_CHUNKS_PER_PAGE limit.
+        """
         if not self.ids_store or self.vector_matrix is None:
             return []
 
@@ -227,6 +224,8 @@ class VectorStoreManager:
                 continue
             if session_id_filter and meta.get("session_id") and meta.get("session_id") != session_id_filter:
                 continue
+            if user_id_filter and meta.get("user_id") and meta.get("user_id") != user_id_filter:
+                continue
             candidate_indices.append(i)
 
         if not candidate_indices:
@@ -235,7 +234,7 @@ class VectorStoreManager:
         sub_matrix = self.vector_matrix[candidate_indices]
         sub_docs = [self.documents_store[i] for i in candidate_indices]
 
-        # 1. Dense Semantic Cosine Similarity
+        # 1. Dense Cosine Similarity
         dense_sims = np.dot(sub_matrix, norm_query.T).flatten()
         dense_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(dense_sims)[::-1])}
 
@@ -246,7 +245,7 @@ class VectorStoreManager:
             bm25_scores = bm25.get_scores(raw_query)
             bm25_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(bm25_scores)[::-1])}
 
-        # 3. Reciprocal Rank Fusion (RRF)
+        # 3. Reciprocal Rank Fusion
         rrf_scores = []
         k_rrf = 60
         for loc_idx in range(len(candidate_indices)):
@@ -258,15 +257,25 @@ class VectorStoreManager:
         rrf_scores.sort(key=lambda x: x[0], reverse=True)
 
         retrieved_chunks = []
+        page_counts: Dict[int, int] = {}
+
         for rrf_val, loc_idx, d_score in rrf_scores:
             if d_score < min_score and len(retrieved_chunks) >= 3:
                 continue
 
             orig_idx = candidate_indices[loc_idx]
+            meta = self.metadata_store[orig_idx]
+            p_num = meta.get("page_number", 1)
+
+            # Cap chunks per page
+            if page_counts.get(p_num, 0) >= MAX_CHUNKS_PER_PAGE:
+                continue
+            page_counts[p_num] = page_counts.get(p_num, 0) + 1
+
             retrieved_chunks.append({
                 "chunk_id": self.ids_store[orig_idx],
                 "text": self.documents_store[orig_idx],
-                "metadata": self.metadata_store[orig_idx],
+                "metadata": meta,
                 "similarity_score": round(float(d_score), 4),
                 "rrf_score": round(float(rrf_val), 4),
                 "distance": round(float(1.0 - d_score), 4)
