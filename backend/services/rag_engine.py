@@ -211,19 +211,19 @@ class GroundedCitationVerifier:
     @staticmethod
     def _is_clean_complete_sentence(s: str) -> bool:
         s_clean = s.strip()
-        if len(s_clean) < 10:
+        if len(s_clean) < 20:
             return False
 
-        # Allow uppercase, number, bullet, quote, or Markdown table pipe |
+        # Must start with uppercase, number, bullet, quote, or Markdown table pipe |
         if not re.match(r'^[A-Z0-9\•\*\-\"\“\|]', s_clean):
             return False
 
-        # Must not end mid-sentence with weak prepositions/conjunctions
-        if re.search(r'\b(at a|the|of|and|or|in|for|with|to|is|are|shown|plotted|figure)\s*$', s_clean, re.IGNORECASE):
+        # Discard lines that cut off mid-phrase without punctuation
+        if re.search(r'\b(at a|the|of|and|or|in|for|with|to|is|are|shown|plotted|figure|shunt|two\-machine)\s*$', s_clean, re.IGNORECASE):
             return False
 
         # Ignore metadata header lines or orphan short headers
-        if re.match(r'^(?:Document|Document ID|Chunk ID|Section|Figure|Table|Unit\s+[V|X|I]+)\b', s_clean, re.IGNORECASE):
+        if re.match(r'^(?:Document|Document ID|Chunk ID|Section|Figure|Table|Unit\s+[V|X|I]+|OBJECTIVES OF)\b', s_clean, re.IGNORECASE):
             return False
 
         if re.match(r'^(?:Page\s+\d+\s*(?:of\s+\d+)?)$', s_clean, re.IGNORECASE):
@@ -273,7 +273,11 @@ class GroundedCitationVerifier:
             raw_text = c.get("raw_content", c["text"])
             clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
 
-            sentences = re.split(r'(?<=[.!?])\s+|\n', clean_text)
+            # UNWRAP PDF line breaks mid-sentence!
+            unwrapped_text = re.sub(r'(?<![.!?:\n])\n(?![A-Z\•\*\-\d\.])', ' ', clean_text)
+            unwrapped_text = re.sub(r'\s+', ' ', unwrapped_text)
+
+            sentences = re.split(r'(?<=[.!?])\s+', unwrapped_text)
             for s in sentences:
                 s_clean = s.strip()
                 s_lower = s_clean.lower()
@@ -289,11 +293,11 @@ class GroundedCitationVerifier:
 
                 item = (page_num, cid, s_clean)
 
-                if any(s_lower.startswith(w) for w in ["the purpose of", "it has long been", "shunt connected", "var compensation", "reactive compensation is"]):
+                if any(w in s_lower for w in ["the purpose of", "it has long been", "shunt connected", "var compensation", "reactive compensation is"]):
                     def_sentences.append(item)
                 elif any(w in s_lower for w in ["objective", "purpose", "aim", "minimize", "maintain"]):
                     obj_sentences.append(item)
-                elif any(w in s_lower for w in ["midpoint", "voltage regulation", "line segmentation", "impedance", "stability", "angle"]):
+                elif any(w in lower_q for w in ["how", "improve", "voltage", "stability", "mechanism"]) and any(w in s_lower for w in ["voltage", "segments", "midpoint", "regulation", "stability", "doubles", "transmittable"]):
                     mech_sentences.append(item)
                 else:
                     gen_sentences.append(item)
@@ -326,11 +330,12 @@ class GroundedCitationVerifier:
 
         elif intent == "mechanism":
             bullets = []
-            for p, cid, s in (mech_sentences + obj_sentences)[:4]:
+            source_candidates = mech_sentences if mech_sentences else (def_sentences + obj_sentences + gen_sentences)
+            for p, cid, s in source_candidates[:4]:
                 bullets.append(f"• {s}")
                 evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
             if bullets:
-                md_output_parts.append("**Voltage Stability & Control Mechanism:**\n" + "\n".join(bullets))
+                md_output_parts.append("**Voltage Stability & Control Mechanism:**\n" + "\n\n".join(bullets))
 
         elif intent == "page_content":
             p_num = intent_obj.target_page or 1
