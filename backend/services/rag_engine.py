@@ -36,8 +36,8 @@ def _extract_text_from_llm_payload(data: Any) -> str:
 class RAGEngine:
     """
     Production-Grade Intent-Driven RAG Engine:
-    - Broad & Specific Query Intent Classifier
-    - Hybrid Search (BGE Dense + BM25 Lexical) via Reciprocal Rank Fusion
+    - Relative Score Filtering (Strictly isolates top-matching chunks)
+    - Full Paragraph Text Extraction & Complete Explanations
     - Natural Language Synthesizer & Page Citation Engine
     """
 
@@ -50,9 +50,6 @@ class RAGEngine:
         self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
     def _is_broad_query(self, query: str) -> bool:
-        """
-        Detects if the user is asking for a summary, overview, or broad document explanation.
-        """
         lower_q = query.lower().strip("?!., ")
         broad_phrases = [
             "summarize", "summary", "overview", "what is it all about", "what is it about",
@@ -135,21 +132,25 @@ class RAGEngine:
 
         all_retrieved.sort(key=lambda x: x.get("rrf_score", x.get("similarity_score", 0)), reverse=True)
 
-        # 2. Context Selection
-        if is_broad:
+        # 2. Strict Relative Score Filtering (Isolate top matching concepts)
+        if not is_broad and all_retrieved:
+            top_score = all_retrieved[0].get("similarity_score", 0)
+            threshold = max(0.18, top_score * 0.75)
+            filtered_chunks = [c for c in all_retrieved if c.get("similarity_score", 0) >= threshold]
+            target_chunks = filtered_chunks[:max(1, min(top_k, 3))]
+        elif is_broad:
             distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
             for dc in distributed_chunks:
                 if dc["chunk_id"] not in seen_ids:
                     all_retrieved.append(dc)
                     seen_ids.add(dc["chunk_id"])
-
             target_chunks = all_retrieved[:8]
         else:
-            target_chunks = all_retrieved[:max(5, top_k)]
+            target_chunks = all_retrieved[:top_k]
 
         if not target_chunks and filename:
             logger.info("Fallback: Retrieving distributed document chunks...")
-            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=6)
+            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=5)
 
         if not target_chunks:
             return {
@@ -248,16 +249,17 @@ RULES:
         else:
             system_instruction = f"""You are a Master AI Document Assistant.
 CRITICAL INSTRUCTION:
-Your goal is to answer the user's intent: "{query}" based strictly on the provided DOCUMENT EXCERPTS.
+Your goal is to answer the user's question: "{query}" based strictly on the provided DOCUMENT EXCERPTS.
 
 RULES:
-1. Understand what the user wants to know and extract ALL exact definitions, numbers, formulas, rules, conditions, and steps matching their query intent.
-2. Explain the answer thoroughly in natural, clear prose using paragraphs, bullet points, and bold text.
-3. Cite page numbers naturally like [Page X] for every fact or figure stated."""
+1. Extract and explain the COMPLETE answer to "{query}" using clear paragraphs, bold terms, and code blocks/examples if present.
+2. Provide full definitions and explanations found in the context.
+3. Do NOT output raw chunk headers or unparsed text lists.
+4. Cite page numbers naturally like [Page X] for every fact stated."""
 
         messages = [
             {"role": "system", "content": f"{system_instruction}\n\nDOCUMENT EXCERPTS:\n{context}"},
-            {"role": "user", "content": f"Based strictly on the DOCUMENT EXCERPTS above, write a natural, comprehensive response answering:\n\n\"{query}\""}
+            {"role": "user", "content": f"Based strictly on the DOCUMENT EXCERPTS above, write a detailed, complete answer for:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -297,27 +299,20 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: High-Quality Fallback Natural Language Synthesizer
-        # Cleans raw chunks, removes header junk, and constructs a readable summary
-        pages_seen = set()
-        clean_facts = []
+        # Priority 3: Full-Paragraph Content Synthesizer Fallback
+        top_chunks = retrieved_chunks[:3]
+        response_sections = []
 
-        for c in retrieved_chunks:
-            page = c["metadata"].get("page_number", 1)
-            pages_seen.add(page)
-            raw_text = c.get("raw_content", c["text"])
-            # Remove metadata header lines
-            lines = [l.strip() for l in raw_text.splitlines() if l.strip() and not l.strip().startswith("[Document:")]
-            
-            for line in lines:
-                if len(line) > 10 and line not in clean_facts:
-                    clean_facts.append(f"{line} [Page {page}]")
+        for chunk in top_chunks:
+            page = chunk["metadata"].get("page_number", "?")
+            raw_text = chunk.get("raw_content", chunk["text"])
+            body_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_text).strip()
+            if body_text and len(body_text) > 15:
+                response_sections.append(f"**From Page {page}:**\n{body_text}")
 
-        if is_broad or any(w in query.lower() for w in ["summary", "summarize", "about", "overview"]):
-            intro = f"### Document Overview & Summary\n\nThis document covers key details across page(s) {', '.join(str(p) for p in sorted(pages_seen))}. Here is an organized breakdown of the content:\n\n"
-            bullet_points = "\n".join([f"• {fact}" for fact in clean_facts[:10]])
-            return intro + bullet_points
+        if response_sections:
+            if is_broad:
+                return f"### Document Overview & Content Summary\n\n" + "\n\n---\n\n".join(response_sections)
+            return f"Here is the detailed content extracted from your document for **\"{query}\"**:\n\n" + "\n\n---\n\n".join(response_sections)
 
-        intro = f"Based on the relevant sections of your document, here are the extracted details answering **\"{query}\"**:\n\n"
-        bullet_points = "\n".join([f"• {fact}" for fact in clean_facts[:8]])
-        return intro + bullet_points
+        return f"I analyzed the document for **\"{query}\"**, but could not extract a detailed answer."
