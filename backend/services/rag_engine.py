@@ -13,9 +13,6 @@ from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 logger = logging.getLogger(__name__)
 
 def _extract_text_from_llm_payload(data: Any) -> str:
-    """
-    Recursively extracts the final text answer from any Cloudflare JSON response structure.
-    """
     if isinstance(data, str):
         s = data.strip()
         return s if len(s) > 5 else ""
@@ -33,13 +30,102 @@ def _extract_text_from_llm_payload(data: Any) -> str:
             return _extract_text_from_llm_payload(res)
     return ""
 
+class ExtractiveQASynthesizer:
+    """
+    Zero-Dependency Extractive Natural Language QA Generator.
+    Synthesizes fluent, human-like answers when external LLM APIs are offline.
+    """
+
+    @staticmethod
+    def classify_question_type(query: str) -> str:
+        q = query.lower()
+        if any(w in q for w in ["how many", "exact number", "total", "count", "number of", "how much"]):
+            return "COUNT_QUANTITY"
+        if any(w in q for w in ["types", "categories", "kinds", "classification", "methods", "varieties"]):
+            return "TYPES_LIST"
+        if any(w in q for w in ["what is", "define", "definition of", "meaning of", "explain what"]):
+            return "DEFINITION"
+        if any(w in q for w in ["summarize", "summary", "overview", "what is it all about", "what is this about"]):
+            return "SUMMARY"
+        return "GENERAL"
+
+    @staticmethod
+    def synthesize_answer(query: str, retrieved_chunks: List[Dict[str, Any]]) -> str:
+        q_type = ExtractiveQASynthesizer.classify_question_type(query)
+        q_words = set(re.findall(r'\w+', query.lower()))
+        stop_words = {"what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for", "a", "an", "and", "or", "give", "me", "exact", "number"}
+        keywords = q_words - stop_words
+
+        all_facts = []
+        seen_texts = set()
+
+        for chunk in retrieved_chunks:
+            page = chunk["metadata"].get("page_number", "?")
+            raw_text = chunk.get("raw_content", chunk["text"])
+            clean_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_text).strip()
+            
+            lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
+            for line in lines:
+                if len(line) > 10 and line not in seen_texts:
+                    seen_texts.add(line)
+                    all_facts.append((page, line))
+
+        if not all_facts:
+            return f"I searched the document for **\"{query}\"**, but could not find relevant details."
+
+        if q_type == "COUNT_QUANTITY":
+            numeric_lines = []
+            for page, fact in all_facts:
+                if re.search(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|levels|grids|total)\b', fact, re.IGNORECASE):
+                    highlighted = re.sub(r'\b(\d+\s*(?:levels|grids|x\d+|modes|types|games|%)?)\b', r'**\1**', fact, flags=re.IGNORECASE)
+                    numeric_lines.append(f"• {highlighted} [Page {page}]")
+            
+            if numeric_lines:
+                return f"### Exact Quantitative Details for **\"{query}\"**:\n\n" + "\n".join(numeric_lines[:6])
+
+        elif q_type == "TYPES_LIST":
+            type_lines = []
+            for page, fact in all_facts:
+                fact_words = set(re.findall(r'\w+', fact.lower()))
+                if any(w in fact.lower() for w in ["category", "type", "method", "class", "1.", "2.", "3.", "•", "-"]) or (keywords and (keywords & fact_words)):
+                    type_lines.append(f"• {fact} [Page {page}]")
+            if type_lines:
+                return f"### Types & Classification for **\"{query}\"**:\n\n" + "\n".join(type_lines[:8])
+
+        elif q_type == "DEFINITION":
+            def_lines = []
+            for page, fact in all_facts:
+                fact_words = set(re.findall(r'\w+', fact.lower()))
+                if keywords and (keywords & fact_words):
+                    def_lines.append(f"• {fact} [Page {page}]")
+            if def_lines:
+                return f"### Definition & Explanation for **\"{query}\"**:\n\n" + "\n".join(def_lines[:6])
+
+        elif q_type == "SUMMARY":
+            summary_lines = [f"• {fact} [Page {page}]" for page, fact in all_facts[:8]]
+            return f"### Executive Summary & Content Overview\n\n" + "\n".join(summary_lines)
+
+        # General Synthesis
+        matched_lines = []
+        for page, fact in all_facts:
+            fact_words = set(re.findall(r'\w+', fact.lower()))
+            if keywords and (keywords & fact_words):
+                matched_lines.append(f"• {fact} [Page {page}]")
+
+        if matched_lines:
+            return f"Based on your document, here are the extracted details for **\"{query}\"**:\n\n" + "\n".join(matched_lines[:8])
+
+        fallback_lines = [f"• {fact} [Page {page}]" for page, fact in all_facts[:6]]
+        return f"Here are the relevant sections for **\"{query}\"**:\n\n" + "\n".join(fallback_lines)
+
+
 class RAGEngine:
     """
-    Production-Grade Intent-Driven RAG Engine:
-    - Intent & Classification Synonym Expansion (Types, Categories, Kinds)
-    - Strict Query Scope Isolation
-    - Context Deduplication
-    - Natural Language Synthesizer & Page Citation Engine
+    Production-Grade Conversational Intent-Driven RAG Engine:
+    - Multi-Turn Follow-Up Query Contextualization
+    - Quantitative & Numeric Intent Expansion
+    - Extractive Local QA Synthesizer (Zero-Dependency Fallback)
+    - Relative Score Filtering & Heading-Body Context Stitching
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -170,7 +256,6 @@ class RAGEngine:
         for c in all_retrieved:
             raw_t = c.get("raw_content", c["text"])
             clean_t = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_t).strip()
-            # Ignore empty, duplicate, or header-only noise chunks
             if len(clean_t) > 35 and clean_t not in seen_texts:
                 seen_texts.add(clean_t)
                 valid_retrieved.append(c)
@@ -209,7 +294,6 @@ class RAGEngine:
             doc_fname = chunk["metadata"].get("filename", "Document")
             clean_chunk_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', chunk['text']).strip()
             
-            # Stitch adjacent chunk if text is short (< 150 chars)
             if len(clean_chunk_text) < 150:
                 c_idx = chunk["metadata"].get("chunk_index", 0)
                 adjacent = [
@@ -224,7 +308,7 @@ class RAGEngine:
 
         combined_context = "\n\n".join(context_blocks)
 
-        # 4. LLM Synthesis
+        # 4. LLM / Extractive Synthesis
         raw_answer = self._generate_detailed_llm_response(
             system_prompt=effective_system_prompt,
             context=combined_context,
@@ -309,13 +393,13 @@ Answer ONLY the specific query asked by the user: "{query}".
 
 RULES:
 1. Focus SPECIFICALLY and ONLY on answering "{query}".
-2. If asking for types, categories, or classifications, list and explain each type clearly using numbered or bulleted lists.
+2. If asking for types, categories, or numbers, list and explain each clearly using bold text and bullet points.
 3. Do NOT repeat identical text blocks.
 4. Cite page numbers naturally like [Page X]."""
 
         messages = [
-            {"role": "system", "content": f"{system_instruction}\n\nDOCUMENT CONTEXT:\n{context}"},
-            {"role": "user", "content": f"Based strictly on the DOCUMENT CONTEXT above, write a direct, highly accurate answer focusing ONLY on:\n\n\"{query}\""}
+            {"role": "system", "content": f"{system_instruction}\n\nDOCUMENT EXCERPTS:\n{context}"},
+            {"role": "user", "content": f"Based strictly on the DOCUMENT EXCERPTS above, write a direct, highly accurate answer focusing ONLY on:\n\n\"{query}\""}
         ]
 
         payload = {
@@ -355,39 +439,5 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: Query-Isolated Content Synthesizer Fallback with Deduplication
-        response_sections = []
-        seen_texts = set()
-
-        for chunk in retrieved_chunks:
-            page = chunk["metadata"].get("page_number", "?")
-            doc_fname = chunk["metadata"].get("filename", "")
-            c_idx = chunk["metadata"].get("chunk_index", 0)
-            
-            raw_text = chunk.get("raw_content", chunk["text"])
-            body_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_text).strip()
-            
-            if len(body_text) < 150:
-                adjacent = [
-                    self.vector_store.documents_store[j] for j, meta in enumerate(self.vector_store.metadata_store)
-                    if meta.get("filename") == doc_fname and meta.get("page_number") == page and meta.get("chunk_index") == c_idx + 1
-                ]
-                if adjacent:
-                    clean_adj = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', adjacent[0]).strip()
-                    body_text += "\n\n" + clean_adj
-
-            if body_text and len(body_text) > 30 and body_text not in seen_texts:
-                seen_texts.add(body_text)
-                response_sections.append(f"**From Page {page}:**\n{body_text}")
-
-        if response_sections:
-            if is_broad:
-                return f"### Document Overview & Content Summary\n\n" + "\n\n---\n\n".join(response_sections)
-            
-            # Heading customization for "types" or "categories"
-            if any(w in query.lower() for w in ["types", "categories", "kinds", "how many types"]):
-                return f"### Types & Classification Extracted for **\"{query}\"**:\n\n" + "\n\n---\n\n".join(response_sections)
-
-            return "\n\n---\n\n".join(response_sections)
-
-        return f"I analyzed the document for **\"{query}\"**, but could not extract a detailed answer."
+        # Priority 3: Extractive Natural Language QA Synthesizer (Zero-Dependency Local QA Generator)
+        return ExtractiveQASynthesizer.synthesize_answer(query=query, retrieved_chunks=retrieved_chunks)
