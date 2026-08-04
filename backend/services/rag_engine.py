@@ -258,9 +258,13 @@ class ConversationResolver:
         if chat_history and len(query.split()) <= 5:
             user_msgs = [m["content"] for m in chat_history if m.get("role") == "user" and m.get("content", "").strip()]
             if user_msgs:
-                prev_q = user_msgs[-1]
-                if prev_q.strip() and prev_q.lower() != lower_q:
-                    return f"{prev_q} - {query}"
+                prev_q = user_msgs[-1].strip()
+                prev_q_lower = prev_q.lower()
+                # Skip fusion if the previous query was a summary/overview command
+                is_prev_summary = any(x in prev_q_lower for x in ["summarise", "summarize", "summary", "overview", "pdf about"])
+                if not is_prev_summary:
+                    if prev_q and prev_q_lower != lower_q:
+                        return f"{prev_q} - {query}"
 
         return clean_q
 

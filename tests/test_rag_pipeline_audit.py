@@ -273,5 +273,14 @@ class TestRAGPipelineAudit(unittest.TestCase):
             self.assertIn("mixed.pdf", chunk["filename"])
             self.assertGreater(chunk["token_count"], 0)
 
+    def test_11_history_fusion_with_summary(self):
+        chat_history = [
+            {"role": "user", "content": "summarise it"},
+            {"role": "assistant", "content": "Executive Summary of jay_resume1.pdf:"}
+        ]
+        resolved, intent_obj = QueryRewriter.rewrite_query("where is he from", chat_history)
+        self.assertEqual(resolved, "where is he from")
+        self.assertNotEqual(intent_obj.intent, "summary")
+
 if __name__ == "__main__":
     unittest.main()
