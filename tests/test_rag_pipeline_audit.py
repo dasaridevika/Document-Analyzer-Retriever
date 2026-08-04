@@ -21,6 +21,30 @@ class TestRAGPipelineAudit(unittest.TestCase):
         self.vector_store.clear_all()
         self.rag = RAGEngine(embedding_service=self.embed_service, vector_store=self.vector_store)
 
+    def test_summary_query_uk_and_us_spelling(self):
+        """
+        Proves that 'summarise the given document' and 'summarise it' correctly trigger summary intent
+        and return a structured document executive summary.
+        """
+        hvdc_pages = [
+            {
+                "page_number": 1,
+                "text": "Unit VI: STATIC SHUNT COMPENSATORS\nOBJECTIVES OF SHUNT COMPENSATION:\nIt has long been recognized that the steady-state transmittable power can be increased and the voltage profile along the line controlled by appropriate reactive shunt compensation. The purpose of this reactive compensation is to change the natural electrical characteristics of the transmission line to make it more compatible with the prevailing load demand."
+            }
+        ]
+        chunks = self.chunker.create_chunks(hvdc_pages, filename="hvdc.pdf", document_id="doc_hvdc")
+        self.vector_store.add_chunks(chunks, self.embed_service.generate_embeddings([c["text"] for c in chunks]))
+
+        # Test UK spelling "summarise the given document"
+        res_uk = self.rag.answer_query("summarise the given document", filename="hvdc.pdf", document_id="doc_hvdc")
+        self.assertEqual(res_uk["rag_trace"]["query_intent"], "summary")
+        self.assertIn("Executive Summary", res_uk["answer"])
+
+        # Test short pronoun "summarise it"
+        res_it = self.rag.answer_query("summarise it", filename="hvdc.pdf", document_id="doc_hvdc")
+        self.assertEqual(res_it["rag_trace"]["query_intent"], "summary")
+        self.assertIn("Executive Summary", res_it["answer"])
+
     def test_intent_retrieval_different_chunks_and_context(self):
         """
         Proves that 'What is shunt compensation?', 'What are the objectives of shunt compensation?',

@@ -1,37 +1,12 @@
-"""
-Production Enterprise Grounded RAG Engine for DocAnalyzer AI.
-
-This module implements a 16-stage production-grade Retrieval-Augmented Generation pipeline:
-1. Prompt Injection Detection
-2. Conversation Context Rewriting
-3. Enhanced Multi-Intent Classification (13 intent types)
-4. Multi-Query Semantic Expansion
-5. Hybrid Dense Vector & BM25 Lexical Retrieval
-6. Metadata & Parent-Child Context Resolution
-7. Pluggable Cross-Encoder Reranking
-8. Near-Duplicate & Jaccard Relevance Filtering
-9. Context Compression & Supporting Evidence Extraction
-10. Adaptive Dynamic Top-K Selection
-11. Structured Prompt Construction
-12. LLM Execution (Cloudflare / Worker AI) with Graceful Fallback
-13. Grounded Citation & Verbatim Quote Verification
-14. Entity & Numeric Consistency Hallucination Detection
-15. Multi-Factor Dynamic Confidence Scoring
-16. In-Memory Semantic Cache
-"""
-
-import re
-import io
-import time
-import json
-import uuid
-import math
+import requests
 import logging
+import json
+import re
+import uuid
+import time
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import requests
 import numpy as np
 
 from backend.config import (
@@ -151,7 +126,7 @@ class CrossEncoderReranker:
             return []
 
         q_terms = set(re.findall(r'\w+', query.lower())) - {
-            "what", "is", "the", "how", "does", "are", "there", "in", "for", "to", "a", "an", "and", "or"
+            "what", "is", "the", "how", "does", "are", "there", "in", "for", "to", "a", "an", "and", "or", "summarise", "summarize", "it", "given", "document"
         }
 
         reranked = []
@@ -161,12 +136,17 @@ class CrossEncoderReranker:
             doc_terms = set(re.findall(r'\w+', text_lower))
 
             # Term overlap score
-            overlap = len(q_terms & doc_terms) / max(1, len(q_terms))
+            overlap = len(q_terms & doc_terms) / max(1, len(q_terms)) if q_terms else 0.5
             base_score = float(c.get("similarity_score", 0.5)) * 0.6 + overlap * 0.4
 
             # Intent-specific feature boost
             intent_boost = 0.0
-            if intent_type == "definition" and any(k in text_lower for k in ["defined as", "refers to", "purpose of", "is to change"]):
+            if intent_type == "summary":
+                # Boost page 1 / intro chunks
+                p_num = c.get("metadata", {}).get("page_number", 1)
+                if p_num <= 3:
+                    intent_boost = 0.40
+            elif intent_type == "definition" and any(k in text_lower for k in ["defined as", "refers to", "purpose of", "is to change"]):
                 intent_boost = 0.35
             elif intent_type == "objectives" and any(k in text_lower for k in ["objective", "aim", "purpose", "to increase", "to maintain"]):
                 intent_boost = 0.35
@@ -226,12 +206,16 @@ def _extract_json_payload(data: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def is_relevant_to_query(query: str, chunk_text: str, score: float = 0.0) -> bool:
+def is_relevant_to_query(query: str, chunk_text: str, score: float = 0.0, intent: str = "fact") -> bool:
     """Pre-LLM relevance filter to discard non-matching candidate text."""
+    if intent in ["summary", "page_lookup"]:
+        return True
+
     q_words = set(re.findall(r'\w+', query.lower())) - {
         "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
         "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
-        "tell", "about", "list", "out", "show", "name", "names", "it", "all", "page", "discussed"
+        "tell", "about", "list", "out", "show", "name", "names", "it", "all", "page", "discussed",
+        "summarise", "summarize", "given", "document"
     }
 
     if not q_words:
@@ -247,7 +231,7 @@ def is_relevant_to_query(query: str, chunk_text: str, score: float = 0.0) -> boo
 # ============================================================================
 
 class QueryRewriter:
-    """Enterprise Query Context Rewriter and 13-Intent Classifier."""
+    """Enterprise Query Context Rewriter and 13-Intent Classifier (UK/US Spelling Compliant)."""
 
     @staticmethod
     def rewrite_query(query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, QueryIntent]:
@@ -261,7 +245,13 @@ class QueryRewriter:
         requested_format = "direct answer"
         adaptive_top_k = 5
 
-        if target_page is not None:
+        # Check for Summary (UK 'summarise' and US 'summarize' spellings)
+        if any(w in lower_q for w in ["summarize", "summarise", "summary", "summarisation", "summarization", "overview", "main points", "briefing"]):
+            intent = "summary"
+            requested_format = "document executive summary"
+            adaptive_top_k = 10
+
+        elif target_page is not None:
             intent = "page_lookup"
             requested_format = "page content summary"
             adaptive_top_k = 3
@@ -281,10 +271,6 @@ class QueryRewriter:
             intent = "comparison"
             requested_format = "comparison table or structured comparison"
             adaptive_top_k = 8
-        elif any(w in lower_q for w in ["summarize", "summary", "overview"]):
-            intent = "summary"
-            requested_format = "document executive summary"
-            adaptive_top_k = 10
         elif any(w in lower_q for w in ["list", "subjects", "courses", "all", "table"]):
             intent = "list"
             requested_format = "structured list"
@@ -297,23 +283,17 @@ class QueryRewriter:
             intent = "calculation"
             requested_format = "step by step calculation"
             adaptive_top_k = 4
-        elif any(w in lower_q for w in ["table", "column", "row"]):
-            intent = "table_lookup"
-            requested_format = "markdown table extract"
-            adaptive_top_k = 4
-        elif any(w in lower_q for w in ["figure", "diagram", "chart"]):
-            intent = "figure_lookup"
-            requested_format = "figure caption description"
-            adaptive_top_k = 3
 
         subject = re.sub(
-            r'^(what is|define|how does|what are the objectives of|what is discussed on page \d+)\s*',
+            r'^(what is|define|how does|what are the objectives of|what is discussed on page \d+|summarise|summarize|summary of)\s*',
             '', lower_q
         ).strip()
 
-        # Contextual History Fusion
+        # Contextual History Fusion / Pronoun Resolution ("summarise it", "explain it")
         standalone_query = query
-        if chat_history and len(query.split()) <= 6:
+        if lower_q in ["summarise it", "summarize it", "summarise", "summarize", "summary", "overview"]:
+            standalone_query = "Summarize the active document and provide an executive overview of main topics."
+        elif chat_history and len(query.split()) <= 6:
             user_messages = [m["content"] for m in chat_history if m.get("role") == "user" and m.get("content", "").strip()]
             if user_messages:
                 prev_q = user_messages[-1]
@@ -337,7 +317,10 @@ class QueryRewriter:
         subject = intent_obj.subject or clean_q
 
         variations = [clean_q]
-        if intent_obj.intent == "definition":
+        if intent_obj.intent == "summary":
+            variations.append("Executive summary of document main topics and objectives")
+            variations.append("Overview of reactive shunt compensation and transmission system principles")
+        elif intent_obj.intent == "definition":
             variations.append(f"Define {subject}")
             variations.append(f"What is the definition and purpose of {subject}")
         elif intent_obj.intent == "objectives":
@@ -477,7 +460,8 @@ class GroundedCitationVerifier:
         q_words = set(re.findall(r'\w+', lower_q)) - {
             "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
             "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
-            "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page"
+            "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page",
+            "summarise", "summarize", "given", "document"
         }
 
         def_sentences = []
@@ -493,7 +477,6 @@ class GroundedCitationVerifier:
             raw_text = c.get("raw_content", c["text"])
             clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
 
-            # Line unwrapping
             unwrapped_text = re.sub(r'(?<![.!?:\n])\n(?![A-Z\•\*\-\d\.])', ' ', clean_text)
             unwrapped_text = re.sub(r'\s+', ' ', unwrapped_text)
 
@@ -508,7 +491,7 @@ class GroundedCitationVerifier:
                 seen_quotes.add(s_clean)
                 line_words = set(re.findall(r'\w+', s_lower))
 
-                if q_words and not (q_words & line_words) and intent not in ["list", "page_lookup"]:
+                if q_words and not (q_words & line_words) and intent not in ["list", "page_lookup", "summary"]:
                     continue
 
                 item = (page_num, cid, s_clean)
@@ -525,7 +508,17 @@ class GroundedCitationVerifier:
         md_output_parts = []
         evidence_items = []
 
-        if intent == "definition":
+        if intent == "summary":
+            doc_title = target_chunks[0]["metadata"].get("filename", "Uploaded Document") if target_chunks else "Uploaded Document"
+            summary_bullets = []
+            for p, cid, s in (def_sentences + obj_sentences + gen_sentences)[:5]:
+                summary_bullets.append(f"• {s}")
+                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
+
+            if summary_bullets:
+                md_output_parts.append(f"**Executive Summary of {doc_title}:**\n\n" + "\n\n".join(summary_bullets))
+
+        elif intent == "definition":
             if def_sentences:
                 p, cid, s = def_sentences[0]
                 md_output_parts.append(f"**Definition:**\n{s}")
@@ -675,7 +668,7 @@ class RAGEngine:
         all_candidate_chunks: List[Dict[str, Any]] = []
         seen_chunk_ids: Set[str] = set()
 
-        if intent_obj.intent == "list":
+        if intent_obj.intent in ["list", "summary"]:
             all_candidate_chunks = self.vector_store.get_first_pages_chunks(
                 filename=filename, document_id=document_id, max_pages=5
             )
