@@ -4,34 +4,34 @@
 html, body, .stApp {
     font-family: 'Inter', sans-serif;
     background-color: #f8f9fe !important;
-    color: #1e293b !important;
+    color: #000000 !important;
 }
 
 /* Headings */
 h1, h2, h3, h4, h5, h6, .doc-header-title, .card-title {
-    color: #0f172a !important;
+    color: #000000 !important;
 }
 
 /* Markdown Text */
 .stMarkdown p, .stMarkdown li, .stMarkdown span {
-    color: #1e293b !important;
+    color: #000000 !important;
 }
 
 /* Chat Message Content */
 [data-testid="stChatMessage"] p, 
 [data-testid="stChatMessage"] li, 
 [data-testid="stChatMessage"] span {
-    color: #0f172a !important;
+    color: #000000 !important;
 }
 
 /* Form Inputs and Text Areas */
 .stTextInput input, .stTextArea textarea, .stChatInput textarea {
-    color: #1e293b !important;
+    color: #000000 !important;
     background-color: #ffffff !important;
 }
 
 .stTextInput label, .stTextArea label, .stSelectbox label {
-    color: #334155 !important;
+    color: #000000 !important;
 }
 
 /* Sidebar Text */
@@ -44,7 +44,7 @@ h1, h2, h3, h4, h5, h6, .doc-header-title, .card-title {
 [data-testid="stSidebar"] h4, 
 [data-testid="stSidebar"] h5, 
 [data-testid="stSidebar"] h6 {
-    color: #0f172a !important;
+    color: #000000 !important;
 }
 
 /* Hide default Streamlit elements */
@@ -55,13 +55,13 @@ footer {visibility: hidden;}
 .doc-header-title {
     font-size: 1.6rem;
     font-weight: 700;
-    color: #0f172a;
+    color: #000000;
     margin-bottom: 2px;
 }
 
 .doc-header-sub {
     font-size: 0.9rem;
-    color: #64748b;
+    color: #000000;
     margin-bottom: 16px;
 }
 
@@ -78,14 +78,14 @@ footer {visibility: hidden;}
 .card-title {
     font-size: 0.95rem;
     font-weight: 600;
-    color: #334155;
+    color: #000000;
     margin-bottom: 4px;
 
 }
 
 .card-sub {
     font-size: 0.8rem;
-    color: #64748b;
+    color: #000000;
     margin-bottom: 12px;
 }
 
@@ -105,7 +105,7 @@ footer {visibility: hidden;}
 .doc-item-title {
     font-weight: 600;
     font-size: 0.88rem;
-    color: #0f172a;
+    color: #000000;
     margin: 0;
 }
 
@@ -188,7 +188,7 @@ footer {visibility: hidden;}
     padding: 16px;
     width: 100%;
     font-size: 0.92rem;
-    color: #0f172a;
+    color: #000000;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
