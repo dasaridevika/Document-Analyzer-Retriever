@@ -82,7 +82,7 @@ ALLOWED_CORS_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() in ["true", "1", "yes"]
 
 # Production Security & Upload Limits
-MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", 50 * 1024 * 1024))  # 50MB
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", 200 * 1024 * 1024))  # 200MB
 MAX_PDF_PAGE_COUNT = int(os.getenv("MAX_PDF_PAGE_COUNT", 5000))
 ALLOWED_FILE_EXTENSIONS = [".pdf"]
 

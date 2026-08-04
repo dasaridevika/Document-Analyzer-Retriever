@@ -127,7 +127,7 @@ async def upload_document(
 
     content = await file.read()
 
-    if len(content) > MAX_UPLOAD_SIZE_BYTES:
+    if MAX_UPLOAD_SIZE_BYTES > 0 and len(content) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(status_code=400, detail=f"File exceeds maximum upload size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB.")
 
     if not content.startswith(b"%PDF"):
