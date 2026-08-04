@@ -1,7 +1,7 @@
 import requests
 import logging
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from backend.config import (
     CLOUDFLARE_ACCOUNT_ID,
     CLOUDFLARE_API_TOKEN,
@@ -35,10 +35,10 @@ def _extract_text_from_llm_payload(data: Any) -> str:
 
 class RAGEngine:
     """
-    Production-Grade Intent-Driven RAG Engine:
-    - Heading-Aware Chunk Context Stitching
-    - Relative Score Filtering (Strictly isolates top-matching chunks)
-    - Full Paragraph Text Extraction & Complete Explanations
+    Production-Grade Conversational Intent-Driven RAG Engine:
+    - Multi-Turn Follow-Up Query Contextualization
+    - Quantitative & Numeric Intent Expansion
+    - Relative Score Filtering & Heading-Body Context Stitching
     - Natural Language Synthesizer & Page Citation Engine
     """
 
@@ -57,9 +57,33 @@ class RAGEngine:
             "what is this about", "explain this", "tell me about this", "explain the document",
             "what is this document", "what does this document contain", "table of contents",
             "full document", "executive summary", "main topics", "key points", "what is this",
-            "tell me about the document", "describe the document", "summarize it"
+            "tell me about the document", "describe the document", "summarize it", "what is its all about"
         ]
         return any(phrase in lower_q for phrase in broad_phrases) or lower_q in ["summarize it", "summarize", "explain", "describe", "overview"]
+
+    def _contextualize_query(self, query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> str:
+        """
+        Rewrites ambiguous follow-up questions (e.g. 'give me exact number') using recent chat history.
+        """
+        if not chat_history:
+            return query
+        
+        # Check if query is short or ambiguous
+        is_follow_up = len(query.split()) <= 5 or any(p in query.lower() for p in ["exact number", "give me", "how many", "more details", "which one", "why"])
+        if not is_follow_up:
+            return query
+
+        user_messages = [m["content"] for m in chat_history if m.get("role") == "user" and m["content"].strip()]
+        if len(user_messages) >= 2:
+            prev_q = user_messages[-2]  # previous user question before current one
+            if prev_q.strip() and prev_q.lower() != query.lower():
+                return f"{prev_q} - {query}"
+        elif user_messages:
+            prev_q = user_messages[-1]
+            if prev_q.strip() and prev_q.lower() != query.lower():
+                return f"{prev_q} - {query}"
+
+        return query
 
     def _expand_query_intent(self, query: str) -> List[str]:
         expanded = [query]
@@ -72,6 +96,8 @@ class RAGEngine:
             "requirement": ["criteria", "condition", "prerequisite", "rule", "specification"],
             "how to": ["steps", "procedure", "method", "instructions", "guide"],
             "due date": ["deadline", "timeline", "due date", "expiration", "period"],
+            "how many": ["total", "count", "number", "quantity", "levels", "modes", "grids", "games", "amount"],
+            "exact number": ["total number", "count", "exact count", "levels", "quantity", "number of", "total"],
             "contact": ["email", "phone", "address", "support", "helpdesk"]
         }
 
@@ -81,7 +107,7 @@ class RAGEngine:
                 added_terms.extend(terms)
 
         if added_terms:
-            expanded_str = query + " " + " ".join(added_terms[:6])
+            expanded_str = query + " " + " ".join(added_terms[:8])
             expanded.append(expanded_str)
 
         return expanded
@@ -92,7 +118,8 @@ class RAGEngine:
         filename: str = None,
         system_prompt: str = None,
         top_k: int = 8,
-        temperature: float = 0.1
+        temperature: float = 0.1,
+        chat_history: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         effective_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         clean_query = query.strip()
@@ -109,7 +136,10 @@ class RAGEngine:
             }
 
         is_broad = self._is_broad_query(clean_query)
-        queries_to_embed = self._expand_query_intent(clean_query)
+        
+        # Rewrite query if it is a follow-up turn
+        search_query = self._contextualize_query(clean_query, chat_history)
+        queries_to_embed = self._expand_query_intent(search_query)
 
         # 1. Retrieval
         all_retrieved = []
@@ -120,7 +150,7 @@ class RAGEngine:
             if q_embeddings:
                 chunks = self.vector_store.similarity_search(
                     query_embedding=q_embeddings[0],
-                    raw_query=clean_query,
+                    raw_query=search_query,
                     top_k=top_k,
                     filename_filter=filename,
                     min_score=0.10 if is_broad else 0.15
@@ -133,12 +163,12 @@ class RAGEngine:
 
         all_retrieved.sort(key=lambda x: x.get("rrf_score", x.get("similarity_score", 0)), reverse=True)
 
-        # 2. Strict Relative Score Filtering (Isolate top matching concepts)
+        # 2. Score Filtering
         if not is_broad and all_retrieved:
             top_score = all_retrieved[0].get("similarity_score", 0)
-            threshold = max(0.18, top_score * 0.75)
+            threshold = max(0.15, top_score * 0.70)
             filtered_chunks = [c for c in all_retrieved if c.get("similarity_score", 0) >= threshold]
-            target_chunks = filtered_chunks[:max(1, min(top_k, 3))]
+            target_chunks = filtered_chunks[:max(1, min(top_k, 4))]
         elif is_broad:
             distributed_chunks = self.vector_store.get_distributed_chunks(filename=filename, count=8)
             for dc in distributed_chunks:
@@ -161,14 +191,14 @@ class RAGEngine:
                 "retrieved_count": 0
             }
 
-        # 3. Format Context (With Heading-Body Context Stitching)
+        # 3. Format Context
         context_blocks = []
         for i, chunk in enumerate(target_chunks):
             page_num = chunk["metadata"].get("page_number", "?")
             doc_fname = chunk["metadata"].get("filename", "Document")
             clean_chunk_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', chunk['text']).strip()
             
-            # If retrieved chunk text is short (< 150 chars), stitch adjacent chunks on same page if available
+            # Stitch adjacent chunk if text is short (< 150 chars)
             if len(clean_chunk_text) < 150:
                 c_idx = chunk["metadata"].get("chunk_index", 0)
                 adjacent = [
@@ -190,7 +220,8 @@ class RAGEngine:
             query=clean_query,
             is_broad=is_broad,
             retrieved_chunks=target_chunks,
-            temperature=temperature
+            temperature=temperature,
+            chat_history=chat_history
         )
 
         sources = [
@@ -266,7 +297,7 @@ CRITICAL INSTRUCTION:
 Your goal is to answer the user's question: "{query}" based strictly on the provided DOCUMENT EXCERPTS.
 
 RULES:
-1. Extract and explain the COMPLETE answer to "{query}" using clear paragraphs, bold terms, and code blocks/examples if present.
+1. Extract and explain the COMPLETE answer to "{query}" using clear paragraphs, bold terms, and exact numbers if requested.
 2. Provide full definitions and explanations found in the context.
 3. Do NOT output raw chunk headers or unparsed text lists.
 4. Cite page numbers naturally like [Page X] for every fact stated."""
@@ -293,7 +324,7 @@ RULES:
         raise RuntimeError("Cloudflare REST API response did not contain valid text.")
 
     def _generate_detailed_llm_response(
-        self, system_prompt: str, context: str, query: str, is_broad: bool, retrieved_chunks: List[Dict[str, Any]], temperature: float
+        self, system_prompt: str, context: str, query: str, is_broad: bool, retrieved_chunks: List[Dict[str, Any]], temperature: float, chat_history: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         # Priority 1: Cloudflare Worker AI Endpoint
         if self.worker_base_url:
@@ -313,7 +344,7 @@ RULES:
             except Exception as e:
                 logger.warning(f"Direct Cloudflare REST API LLM call failed: {e}")
 
-        # Priority 3: Full-Paragraph Content Synthesizer Fallback with Context Stitching
+        # Priority 3: Conversational Full-Paragraph Content Synthesizer Fallback
         top_chunks = retrieved_chunks[:3]
         response_sections = []
 

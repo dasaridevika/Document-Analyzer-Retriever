@@ -163,7 +163,9 @@ def chat_query(req: ChatRequest):
     clean_user_id = req.user_id.strip().lower() if req.user_id else "anonymous_user"
     session_id = req.session_id or f"sess_{int(time.time())}"
 
-    # Record User Message
+    # Fetch recent session history for follow-up resolution
+    recent_messages = history_store.get_messages(session_id=session_id)
+
     history_store.create_session(
         session_id=session_id,
         user_id=clean_user_id,
@@ -178,7 +180,8 @@ def chat_query(req: ChatRequest):
         filename=req.filename,
         system_prompt=req.system_prompt,
         top_k=req.top_k,
-        temperature=req.temperature
+        temperature=req.temperature,
+        chat_history=recent_messages
     )
 
     # Record Assistant Message
