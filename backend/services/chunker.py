@@ -209,6 +209,19 @@ class DocumentChunker:
             # Choose chunking strategy
             if strategy == "semantic":
                 sub_chunks_raw = DocumentChunker._split_semantic(text, chunk_size, chunk_overlap)
+            elif strategy == "hierarchical":
+                parents = DocumentChunker._sub_split_by_tokens(text, max_tokens=600, overlap_tokens=100)
+                sub_chunks_raw = []
+                for p_idx, parent in enumerate(parents):
+                    pid = f"{doc_id}_p{chunk_index}_parent{p_idx}"
+                    # Children chunks
+                    children = DocumentChunker._sub_split_by_tokens(parent, max_tokens=150, overlap_tokens=30)
+                    for child in children:
+                        sub_chunks_raw.append({
+                            "text": child,
+                            "parent_id": pid,
+                            "parent_text": parent
+                        })
             else:
                 raw_paragraphs = [para.strip() for para in re.split(r'\n\s*\n', text) if para.strip()]
                 
@@ -247,7 +260,15 @@ class DocumentChunker:
                         sub_chunks_raw.extend(DocumentChunker._sub_split_by_tokens(para_clean, chunk_size, chunk_overlap))
 
             for sc in sub_chunks_raw:
-                sc_clean = sc.strip()
+                if isinstance(sc, dict):
+                    sc_clean = sc["text"].strip()
+                    parent_text = sc["parent_text"]
+                    parent_id = sc["parent_id"]
+                else:
+                    sc_clean = sc.strip()
+                    parent_text = ""
+                    parent_id = ""
+
                 if not sc_clean or sc_clean in seen_texts:
                     continue
                 seen_texts.add(sc_clean)
@@ -276,6 +297,8 @@ class DocumentChunker:
                     "section_title": section_title,
                     "text": formatted_chunk_text,
                     "raw_content": sc_clean,
+                    "parent_text": parent_text,
+                    "parent_chunk_id": parent_id,
                     "strategy": strategy,
                     "extraction_method": extraction_method,
                     "embedding_model": embedding_model,

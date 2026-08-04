@@ -291,5 +291,37 @@ class TestRAGPipelineAudit(unittest.TestCase):
         self.assertEqual(resolved, "objectives of shunt compensation")
         self.assertEqual(intent_obj.intent, "objectives")
 
+    def test_13_hierarchical_parent_child_retrieval(self):
+        pages = [
+            {
+                "page_number": 1,
+                "text": "This is a very long paragraph that serves as the parent chunk context. " * 20
+            }
+        ]
+        chunks = self.chunker.create_chunks(pages, filename="parent.pdf", document_id="doc_parent", strategy="hierarchical")
+        self.assertTrue(len(chunks) > 0)
+        self.assertEqual(chunks[0]["strategy"], "hierarchical")
+        self.assertIsNotNone(chunks[0]["parent_text"])
+        self.assertIn("parent chunk context", chunks[0]["parent_text"])
+        
+        self.vector_store.add_chunks(chunks, self.embed_service.generate_embeddings([c["text"] for c in chunks]))
+        res = self.rag.answer_query("What serves as parent chunk context?", filename="parent.pdf", document_id="doc_parent")
+        self.assertIsNotNone(res["answer"])
+
+    def test_14_inverted_index_metadata_filtering(self):
+        self.vector_store.clear_all()
+        pages = [{"page_number": 1, "text": "Page 1 intro"}]
+        chunks = self.chunker.create_chunks(pages, filename="Spec.pdf", document_id="doc_spec")
+        self.vector_store.add_chunks(chunks, self.embed_service.generate_embeddings([c["text"] for c in chunks]))
+        
+        self.assertTrue(len(self.vector_store._doc_id_to_indices) > 0)
+        res = self.vector_store.similarity_search(
+            query_embedding=[0.1] * 1024,
+            raw_query="test",
+            document_id_filter="doc_spec"
+        )
+        for item in res:
+            self.assertEqual(item["metadata"]["document_id"], "doc_spec")
+
 if __name__ == "__main__":
     unittest.main()

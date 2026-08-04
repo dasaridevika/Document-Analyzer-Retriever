@@ -6,6 +6,7 @@ import re
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from collections import defaultdict
 from backend.config import VECTOR_DB_DIR, MAX_CHUNKS_PER_PAGE, DENSE_TOP_K, KEYWORD_TOP_K
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,12 @@ class VectorStoreManager:
         self.vector_matrix: Optional[np.ndarray] = None
         self.bm25_index = PersistentBM25Index()
 
+        # Inverted index dictionary maps
+        self._doc_id_to_indices = defaultdict(list)
+        self._filename_to_indices = defaultdict(list)
+        self._session_id_to_indices = defaultdict(list)
+        self._user_id_to_indices = defaultdict(list)
+
         self._init_faiss_engine()
 
     def _init_faiss_engine(self):
@@ -196,6 +203,9 @@ class VectorStoreManager:
                         for i, doc in enumerate(self.documents_store):
                             self.bm25_index.add_document(self.ids_store[i], doc)
 
+                    # Rebuild inverted indices
+                    self._rebuild_inverted_indices()
+
                 logger.info(f"Loaded existing vector index with {len(self.ids_store)} chunks.")
                 return
             except Exception as e:
@@ -203,6 +213,26 @@ class VectorStoreManager:
 
         if self.faiss_module:
             self.faiss_index = self.faiss_module.IndexFlatIP(self.embedding_dim)
+
+    def _rebuild_inverted_indices(self):
+        self._doc_id_to_indices = defaultdict(list)
+        self._filename_to_indices = defaultdict(list)
+        self._session_id_to_indices = defaultdict(list)
+        self._user_id_to_indices = defaultdict(list)
+        
+        for i, meta in enumerate(self.metadata_store):
+            d_id = meta.get("document_id")
+            if d_id:
+                self._doc_id_to_indices[d_id].append(i)
+            fname = meta.get("filename") or meta.get("document_name")
+            if fname:
+                self._filename_to_indices[fname].append(i)
+            s_id = meta.get("session_id")
+            if s_id:
+                self._session_id_to_indices[s_id].append(i)
+            u_id = meta.get("user_id")
+            if u_id:
+                self._user_id_to_indices[u_id].append(i)
 
     def _normalize_vectors(self, vectors: List[List[float]]) -> np.ndarray:
         arr = np.array(vectors, dtype=np.float32)
@@ -266,6 +296,8 @@ class VectorStoreManager:
                 "document_version": c.get("document_version", "1.0"),
                 "page_number": int(c.get("page_number", 1)),
                 "section_title": c.get("section_title", "General Section"),
+                "parent_text": c.get("parent_text", ""),
+                "parent_chunk_id": c.get("parent_chunk_id", ""),
                 "strategy": c.get("strategy", "recursive"),
                 "extraction_method": c.get("extraction_method", "PyMuPDF Reading Order"),
                 "embedding_model": c.get("embedding_model", self.embedding_model),
@@ -273,6 +305,7 @@ class VectorStoreManager:
                 "created_at": c.get("created_at", "")
             })
 
+        self._rebuild_inverted_indices()
         self._save_persistent_faiss()
 
     def get_first_pages_chunks(self, filename: str = None, document_id: str = None, max_pages: int = 5) -> List[Dict[str, Any]]:
@@ -311,17 +344,19 @@ class VectorStoreManager:
             logger.warning(f"Embedding dimension mismatch: Query ({norm_query.shape[1]}) vs Store ({self.vector_matrix.shape[1]})")
             return []
 
-        candidate_indices = []
-        for i, meta in enumerate(self.metadata_store):
-            if document_id_filter and meta.get("document_id") and meta.get("document_id") != document_id_filter:
-                continue
-            if filename_filter and meta.get("filename") != filename_filter and meta.get("document_name") != filename_filter:
-                continue
-            if session_id_filter and meta.get("session_id") and meta.get("session_id") != session_id_filter:
-                continue
-            if user_id_filter and meta.get("user_id") and meta.get("user_id") != user_id_filter:
-                continue
-            candidate_indices.append(i)
+        # Inverted index lookup for O(1) metadata filtering
+        candidates = set(range(len(self.ids_store)))
+        
+        if document_id_filter:
+            candidates &= set(self._doc_id_to_indices.get(document_id_filter, []))
+        if filename_filter:
+            candidates &= set(self._filename_to_indices.get(filename_filter, []))
+        if session_id_filter:
+            candidates &= set(self._session_id_to_indices.get(session_id_filter, []))
+        if user_id_filter:
+            candidates &= set(self._user_id_to_indices.get(user_id_filter, []))
+            
+        candidate_indices = sorted(list(candidates))
 
         if not candidate_indices:
             return []
@@ -437,6 +472,7 @@ class VectorStoreManager:
             self.faiss_index = self.faiss_module.IndexFlatIP(self.embedding_dim)
             self.faiss_index.add(self.vector_matrix)
 
+        self._rebuild_inverted_indices()
         self._save_persistent_faiss()
 
     def _clear_internal(self):
@@ -447,6 +483,7 @@ class VectorStoreManager:
         self.bm25_index = PersistentBM25Index()
         if self.faiss_module:
             self.faiss_index = self.faiss_module.IndexFlatIP(self.embedding_dim)
+        self._rebuild_inverted_indices()
         self._save_persistent_faiss()
 
     def clear_all(self) -> None:

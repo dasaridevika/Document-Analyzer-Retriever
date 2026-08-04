@@ -4,10 +4,22 @@ import json
 import re
 import uuid
 import time
+import os
+import math
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+
+from backend.config import DATA_DIR
+
+try:
+    import onnxruntime as ort
+    from tokenizers import Tokenizer
+    HAS_ONNX = True
+except ImportError:
+    HAS_ONNX = False
 
 from backend.config import (
     CLOUDFLARE_ACCOUNT_ID,
@@ -120,14 +132,105 @@ class SemanticCache:
         self.entries.append((q_vec, document_id or "", result))
 
 
+class ONNXCrossEncoderReranker:
+    """
+    Local Neural Cross-Encoder Reranker using ONNX runtime and Xenova/bge-reranker-base.
+    Computes joint sequence attention for true semantic reranking.
+    """
+    def __init__(self, cache_dir: Optional[Path] = None):
+        self.cache_dir = cache_dir or (DATA_DIR / "onnx_reranker")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.model_path = self.cache_dir / "model.onnx"
+        self.tokenizer_path = self.cache_dir / "tokenizer.json"
+        self.ort_session = None
+        self.tokenizer = None
+        self.enabled = False
+
+    def load(self):
+        import urllib.request
+        model_url = "https://huggingface.co/Xenova/bge-reranker-base/resolve/main/onnx/model.onnx"
+        tokenizer_url = "https://huggingface.co/Xenova/bge-reranker-base/resolve/main/tokenizer.json"
+        
+        try:
+            if not self.model_path.exists():
+                logger.info(f"Downloading ONNX reranker model to {self.model_path}...")
+                urllib.request.urlretrieve(model_url, self.model_path)
+            if not self.tokenizer_path.exists():
+                logger.info(f"Downloading reranker tokenizer to {self.tokenizer_path}...")
+                urllib.request.urlretrieve(tokenizer_url, self.tokenizer_path)
+            
+            self.tokenizer = Tokenizer.from_file(str(self.tokenizer_path))
+            self.ort_session = ort.InferenceSession(str(self.model_path))
+            self.enabled = True
+            logger.info("Successfully loaded local ONNX Neural Cross-Encoder Reranker.")
+        except Exception as e:
+            logger.warning(f"Failed to load ONNX reranker: {e}. Falling back to heuristic reranking.")
+            self.enabled = False
+
+    def compute_score(self, query: str, document: str) -> float:
+        if not self.ort_session or not self.tokenizer:
+            self.load()
+        if not self.enabled:
+            return 0.0
+
+        encoded = self.tokenizer.encode(query, document)
+        input_ids = encoded.ids
+        attention_mask = encoded.attention_mask
+
+        in_ids = np.array([input_ids], dtype=np.int64)
+        attn_mask = np.array([attention_mask], dtype=np.int64)
+        
+        inputs = {
+            "input_ids": in_ids,
+            "attention_mask": attn_mask
+        }
+        
+        outputs = self.ort_session.run(None, inputs)
+        logits = outputs[0]  # Shape: [1, 1]
+        
+        # Sigmoid to get probability/score
+        score = 1.0 / (1.0 + math.exp(-float(logits[0][0])))
+        return score
+
+
 class CrossEncoderReranker:
-    """Pluggable Cross-Encoder Reranker engine (BGE / Cohere / Heuristic Feature Reranking)."""
+    """Pluggable Cross-Encoder Reranker engine (Neural / Heuristic)."""
+    
+    _neural_reranker = None
 
     @staticmethod
     def rerank(query: str, chunks: List[Dict[str, Any]], intent_type: str = "fact") -> List[Dict[str, Any]]:
         if not chunks:
             return []
 
+        # Try to use local ONNX Neural Cross-Encoder if available
+        if HAS_ONNX:
+            if CrossEncoderReranker._neural_reranker is None:
+                try:
+                    CrossEncoderReranker._neural_reranker = ONNXCrossEncoderReranker()
+                    CrossEncoderReranker._neural_reranker.load()
+                except Exception as e:
+                    logger.warning(f"Could not load neural reranker: {e}")
+            
+            if CrossEncoderReranker._neural_reranker and CrossEncoderReranker._neural_reranker.enabled:
+                logger.info(f"Running local ONNX Neural Cross-Encoder Reranker on {len(chunks)} candidate chunks...")
+                scored_chunks = []
+                for chunk in chunks:
+                    try:
+                        score = CrossEncoderReranker._neural_reranker.compute_score(query, chunk["text"])
+                        chunk_copy = chunk.copy()
+                        chunk_copy["cross_score"] = round(score, 4)
+                        scored_chunks.append(chunk_copy)
+                    except Exception as e:
+                        logger.warning(f"Neural rerank failed for chunk: {e}")
+                        chunk_copy = chunk.copy()
+                        chunk_copy["cross_score"] = chunk.get("similarity_score", 0.0)
+                        scored_chunks.append(chunk_copy)
+                
+                scored_chunks.sort(key=lambda x: x["cross_score"], reverse=True)
+                return scored_chunks
+
+        # Heuristic fallback (if ONNX is not available or fails)
         q_terms = set(re.findall(r'\w+', query.lower())) - {
             "what", "is", "the", "how", "does", "are", "there", "in", "for", "to", "a", "an", "and", "or",
             "summarise", "summarize", "it", "given", "document", "explain"
@@ -450,8 +553,14 @@ class GroundedCitationVerifier:
         confidence = float(structured_json.get("confidence", 0.90))
 
         chunk_map = {c["chunk_id"]: c for c in target_chunks}
-        chunk_text_map = {c["chunk_id"]: c["text"] + "\n" + c.get("raw_content", "") for c in target_chunks}
-        all_text_combined = "\n\n".join([c["text"] + "\n" + c.get("raw_content", "") for c in target_chunks])
+        chunk_text_map = {
+            c["chunk_id"]: c["text"] + "\n" + c.get("raw_content", "") + "\n" + c["metadata"].get("parent_text", "")
+            for c in target_chunks
+        }
+        all_text_combined = "\n\n".join([
+            c["text"] + "\n" + c.get("raw_content", "") + "\n" + c["metadata"].get("parent_text", "")
+            for c in target_chunks
+        ])
 
         seen_quotes: Set[str] = set()
         verified_evidence_items: List[str] = []
@@ -802,7 +911,21 @@ class RAGEngine:
             page_num = c["metadata"].get("page_number", "?")
             doc_fname = c["metadata"].get("filename", "Document")
             cid = c["chunk_id"]
-            clean_chunk_text = c["text"]
+            
+            parent_text = c["metadata"].get("parent_text")
+            if parent_text:
+                parent_cid = c["metadata"].get("parent_chunk_id") or cid
+                clean_chunk_text = (
+                    f"Document: {doc_fname}\n"
+                    f"Document ID: {c['metadata'].get('document_id', '')}\n"
+                    f"Page: {page_num}\n"
+                    f"Section: {c['metadata'].get('section_title', 'General Section')}\n"
+                    f"Chunk ID: {parent_cid}\n\n"
+                    f"Content:\n{parent_text}"
+                )
+            else:
+                clean_chunk_text = c["text"]
+                
             context_blocks.append(f"--- [Page {page_num} | Chunk {cid} | Document: {doc_fname}] ---\n{clean_chunk_text}")
 
         combined_context = "<DOCUMENT_CONTEXT>\n" + "\n\n".join(context_blocks) + "\n</DOCUMENT_CONTEXT>"
