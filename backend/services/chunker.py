@@ -1,6 +1,7 @@
 import re
 import uuid
 import datetime
+import logging
 from typing import List, Dict, Any, Optional
 from backend.config import DEFAULT_CHUNK_SIZE_TOKENS, DEFAULT_CHUNK_OVERLAP_TOKENS
 
@@ -9,6 +10,8 @@ try:
     encoding = tiktoken.get_encoding("cl100k_base")
 except Exception:
     encoding = None
+
+logger = logging.getLogger(__name__)
 
 def count_tokens(text: str) -> int:
     if encoding:
@@ -27,6 +30,7 @@ def validate_index_coverage(pdf_page_count: int, chunks: List[Dict[str, Any]]) -
 class DocumentChunker:
     """
     Production Token-Aware Contextual Chunking Engine.
+    Supports recursive paragraph chunking and semantic shift chunking.
     - Preserves extraction_method (pymupdf / ocr) per chunk
     - Index coverage validation
     """
@@ -68,6 +72,109 @@ class DocumentChunker:
         return "General Section"
 
     @staticmethod
+    def _split_semantic(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+        # Split on sentence boundaries using fixed-width lookbehind
+        raw_splits = re.split(r'(?<=[.!?])\s+|\n', text)
+        sentences = []
+        abbreviations = {"e.g.", "i.e.", "dr.", "st.", "mr.", "mrs.", "ms.", "prof.", "vs."}
+        
+        buffer = []
+        for segment in raw_splits:
+            s_clean = segment.strip()
+            if not s_clean:
+                continue
+            buffer.append(s_clean)
+            
+            # Check if this segment ends with a common abbreviation
+            words = s_clean.split()
+            last_word = words[-1].lower() if words else ""
+            if last_word in abbreviations:
+                continue
+            else:
+                sentences.append(" ".join(buffer))
+                buffer = []
+        if buffer:
+            sentences.append(" ".join(buffer))
+
+        if len(sentences) < 2:
+            return [text]
+
+        # Dynamically load embedding service to avoid circular dependency
+        try:
+            from backend.services.embeddings import EmbeddingService
+            embedder = EmbeddingService()
+            embeddings = embedder.generate_embeddings(sentences)
+        except Exception as e:
+            logger.warning(f"EmbeddingService failed in semantic split: {e}. Falling back to standard sentence token splitting.")
+            return DocumentChunker._sub_split_by_tokens(text, chunk_size, chunk_overlap)
+
+        if not embeddings or len(embeddings) != len(sentences):
+            return DocumentChunker._sub_split_by_tokens(text, chunk_size, chunk_overlap)
+
+        # Calculate cosine similarities
+        import numpy as np
+        similarities = []
+        for i in range(len(embeddings) - 1):
+            vec1 = np.array(embeddings[i])
+            vec2 = np.array(embeddings[i+1])
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+            if norm1 > 0 and norm2 > 0:
+                sim = np.dot(vec1, vec2) / (norm1 * norm2)
+            else:
+                sim = 0.0
+            similarities.append(sim)
+
+        distances = [1.0 - sim for sim in similarities]
+        
+        # Split on distance jumps (70th percentile threshold)
+        if distances:
+            threshold = np.percentile(distances, 70)
+            split_indices = [i for i, d in enumerate(distances) if d >= threshold]
+        else:
+            split_indices = []
+
+        # Group sentences into initial raw semantic chunks
+        raw_chunks = []
+        current_chunk = []
+        for idx, s in enumerate(sentences):
+            current_chunk.append(s)
+            if idx in split_indices:
+                raw_chunks.append(" ".join(current_chunk))
+                current_chunk = []
+        if current_chunk:
+            raw_chunks.append(" ".join(current_chunk))
+
+        # Merge tiny adjacent chunks to prevent over-fragmentation
+        merged_chunks = []
+        current_buffer = []
+        current_tokens = 0
+
+        for chunk in raw_chunks:
+            chunk_tokens = count_tokens(chunk)
+            if current_tokens + chunk_tokens <= chunk_size:
+                current_buffer.append(chunk)
+                current_tokens += chunk_tokens
+            else:
+                if current_buffer:
+                    merged_chunks.append(" ".join(current_buffer))
+                current_buffer = [chunk]
+                current_tokens = chunk_tokens
+        if current_buffer:
+            merged_chunks.append(" ".join(current_buffer))
+
+        # Finally, guarantee token boundaries (sub-split any chunks that are too large)
+        final_splits = []
+        for chunk in merged_chunks:
+            tokens = count_tokens(chunk)
+            if tokens <= chunk_size:
+                final_splits.append(chunk)
+            else:
+                final_splits.extend(DocumentChunker._sub_split_by_tokens(chunk, chunk_size, chunk_overlap))
+
+        return final_splits
+
+    @staticmethod
     def chunk_document(
         pages_data: List[Dict[str, Any]],
         filename: str,
@@ -98,80 +205,86 @@ class DocumentChunker:
                 continue
 
             section_title = DocumentChunker._extract_section_title(text)
-            raw_paragraphs = [para.strip() for para in re.split(r'\n\s*\n', text) if para.strip()]
-            
-            merged_paragraphs = []
-            buffer = ""
 
-            for para in raw_paragraphs:
-                if buffer:
-                    buffer += "\n\n" + para
-                    if count_tokens(buffer) >= 30:
-                        merged_paragraphs.append(buffer)
-                        buffer = ""
-                else:
-                    if count_tokens(para) < 30:
-                        buffer = para
+            # Choose chunking strategy
+            if strategy == "semantic":
+                sub_chunks_raw = DocumentChunker._split_semantic(text, chunk_size, chunk_overlap)
+            else:
+                raw_paragraphs = [para.strip() for para in re.split(r'\n\s*\n', text) if para.strip()]
+                
+                merged_paragraphs = []
+                buffer = ""
+
+                for para in raw_paragraphs:
+                    if buffer:
+                        buffer += "\n\n" + para
+                        if count_tokens(buffer) >= 30:
+                            merged_paragraphs.append(buffer)
+                            buffer = ""
                     else:
-                        merged_paragraphs.append(para)
+                        if count_tokens(para) < 30:
+                            buffer = para
+                        else:
+                            merged_paragraphs.append(para)
 
-            if buffer:
-                if merged_paragraphs:
-                    merged_paragraphs[-1] += "\n\n" + buffer
-                else:
-                    merged_paragraphs.append(buffer)
+                if buffer:
+                    if merged_paragraphs:
+                        merged_paragraphs[-1] += "\n\n" + buffer
+                    else:
+                        merged_paragraphs.append(buffer)
 
-            for para in merged_paragraphs:
-                para_clean = para.strip()
-                if not para_clean:
-                    continue
-
-                tokens_in_para = count_tokens(para_clean)
-
-                if tokens_in_para <= chunk_size:
-                    sub_chunks_raw = [para_clean]
-                else:
-                    sub_chunks_raw = DocumentChunker._sub_split_by_tokens(para_clean, chunk_size, chunk_overlap)
-
-                for sc in sub_chunks_raw:
-                    sc_clean = sc.strip()
-                    if not sc_clean or sc_clean in seen_texts:
+                sub_chunks_raw = []
+                for para in merged_paragraphs:
+                    para_clean = para.strip()
+                    if not para_clean:
                         continue
-                    seen_texts.add(sc_clean)
 
-                    cid = f"{doc_id}_c{chunk_index}"
+                    tokens_in_para = count_tokens(para_clean)
 
-                    formatted_chunk_text = (
-                        f"Document: {filename}\n"
-                        f"Document ID: {doc_id}\n"
-                        f"Page: {page_num}\n"
-                        f"Section: {section_title}\n"
-                        f"Chunk ID: {cid}\n\n"
-                        f"Content:\n{sc_clean}"
-                    )
+                    if tokens_in_para <= chunk_size:
+                        sub_chunks_raw.append(para_clean)
+                    else:
+                        sub_chunks_raw.extend(DocumentChunker._sub_split_by_tokens(para_clean, chunk_size, chunk_overlap))
 
-                    chunks.append({
-                        "chunk_id": cid,
-                        "chunk_index": chunk_index,
-                        "document_id": doc_id,
-                        "session_id": sess_id,
-                        "user_id": clean_uid,
-                        "filename": filename,
-                        "document_name": filename,
-                        "document_version": "1.0",
-                        "page_number": page_num,
-                        "section_title": section_title,
-                        "text": formatted_chunk_text,
-                        "raw_content": sc_clean,
-                        "strategy": strategy,
-                        "extraction_method": extraction_method,
-                        "embedding_model": embedding_model,
-                        "embedding_dimension": embedding_dim,
-                        "created_at": created_timestamp,
-                        "token_count": count_tokens(formatted_chunk_text),
-                        "char_count": len(formatted_chunk_text)
-                    })
-                    chunk_index += 1
+            for sc in sub_chunks_raw:
+                sc_clean = sc.strip()
+                if not sc_clean or sc_clean in seen_texts:
+                    continue
+                seen_texts.add(sc_clean)
+
+                cid = f"{doc_id}_c{chunk_index}"
+
+                formatted_chunk_text = (
+                    f"Document: {filename}\n"
+                    f"Document ID: {doc_id}\n"
+                    f"Page: {page_num}\n"
+                    f"Section: {section_title}\n"
+                    f"Chunk ID: {cid}\n\n"
+                    f"Content:\n{sc_clean}"
+                )
+
+                chunks.append({
+                    "chunk_id": cid,
+                    "chunk_index": chunk_index,
+                    "document_id": doc_id,
+                    "session_id": sess_id,
+                    "user_id": clean_uid,
+                    "filename": filename,
+                    "document_name": filename,
+                    "document_version": "1.0",
+                    "page_number": page_num,
+                    "section_title": section_title,
+                    "text": formatted_chunk_text,
+                    "raw_content": sc_clean,
+                    "strategy": strategy,
+                    "extraction_method": extraction_method,
+                    "embedding_model": embedding_model,
+                    "embedding_dimension": embedding_dim,
+                    "created_at": created_timestamp,
+                    "token_count": count_tokens(formatted_chunk_text),
+                    "char_count": len(formatted_chunk_text)
+                })
+                chunk_index += 1
 
         return chunks
 
@@ -213,4 +326,5 @@ class DocumentChunker:
 
         return result
 
+# Export aliases
 TextChunker = DocumentChunker

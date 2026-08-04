@@ -259,5 +259,19 @@ class TestRAGPipelineAudit(unittest.TestCase):
         self.assertEqual(elements[1][3], "Paragraph 2 text")
         self.assertEqual(elements[2][3], "Paragraph 3 text")
 
+    def test_10_semantic_chunking_strategy(self):
+        pages = [
+            {
+                "page_number": 1,
+                "text": "Static shunt compensators are used to control the voltage profile along the transmission line. Shunt compensation changes the electrical characteristics of the system. In contrast, Firebase Authentication verifies Google Sign-in ID tokens. The authentication service checks cryptographic JWT signatures to authorize users."
+            }
+        ]
+        chunks = self.chunker.create_chunks(pages, filename="mixed.pdf", document_id="doc_mixed", strategy="semantic")
+        self.assertTrue(len(chunks) > 0)
+        self.assertEqual(chunks[0]["strategy"], "semantic")
+        for chunk in chunks:
+            self.assertIn("mixed.pdf", chunk["filename"])
+            self.assertGreater(chunk["token_count"], 0)
+
 if __name__ == "__main__":
     unittest.main()
