@@ -465,7 +465,7 @@ class GroundedCitationVerifier:
                 else:
                     if quote not in seen_quotes:
                         seen_quotes.add(quote)
-                        verified_evidence_items.append(f"- Page {page or 1}, chunk {cid or 'c0'}: “{quote}”")
+                        verified_evidence_items.append(f"- Page {page or 1}, chunk {cid or 'c0'}: â€œ{quote}â€")
 
         md_parts = []
         if raw_definition:
@@ -491,7 +491,7 @@ class GroundedCitationVerifier:
         s_clean = s.strip()
         if len(s_clean) < 18:
             return False
-        if not re.match(r'^[A-Z0-9\•\*\-\"\“\|]', s_clean):
+        if not re.match(r'^[A-Z0-9\â€¢\*\-\"\â€œ\|]', s_clean):
             return False
         if re.search(r'\b(at a|the|of|and|or|in|for|with|to|is|are|shown|plotted|figure|shunt|two\-machine)\s*$', s_clean, re.IGNORECASE):
             return False
@@ -516,7 +516,7 @@ class GroundedCitationVerifier:
             ans = (
                 f"## Answer\n\n**Definition:**\n{hvdc_def}\n\n"
                 f"**Explanation:**\nIn your document (*{doc_title}*), reactive shunt compensation is applied to HVDC & FACTS transmission lines to regulate voltage profiles and increase power transfer capability.\n\n"
-                f"## Evidence\n\n- Page {page1}, chunk {cid1}: “{hvdc_def}”"
+                f"## Evidence\n\n- Page {page1}, chunk {cid1}: â€œ{hvdc_def}â€"
             )
             return {
                 "answer": ans,
@@ -540,7 +540,7 @@ class GroundedCitationVerifier:
             raw_text = c.get("raw_content", c["text"])
             clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
 
-            unwrapped = re.sub(r'(?<![.!?:\n])\n(?![A-Z\•\*\-\d\.])', ' ', clean_text)
+            unwrapped = re.sub(r'(?<![.!?:\n])\n(?![A-Z\â€¢\*\-\d\.])', ' ', clean_text)
             unwrapped = re.sub(r'\s+', ' ', unwrapped)
 
             for s in re.split(r'(?<=[.!?])\s+', unwrapped):
@@ -561,8 +561,8 @@ class GroundedCitationVerifier:
 
         if intent in ["summary", "overview"]:
             doc_title = target_chunks[0]["metadata"].get("filename", "Uploaded Document") if target_chunks else "Uploaded Document"
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:5]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:5]]
+            bullets = [f"â€¢ {s}" for p, cid, s in extracted_items[:5]]
+            evidence_items = [f"- Page {p}, chunk {cid}: â€œ{s[:120]}â€" for p, cid, s in extracted_items[:5]]
             if bullets:
                 md_output_parts.append(f"**Executive Summary of {doc_title}:**\n\n" + "\n\n".join(bullets))
 
@@ -570,33 +570,33 @@ class GroundedCitationVerifier:
             if extracted_items:
                 p, cid, s = extracted_items[0]
                 md_output_parts.append(f"**Definition:**\n{s}")
-                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
+                evidence_items.append(f"- Page {p}, chunk {cid}: â€œ{s[:120]}â€")
                 if len(extracted_items) > 1:
                     p2, cid2, s2 = extracted_items[1]
                     md_output_parts.append(f"**Explanation:**\n{s2}")
-                    evidence_items.append(f"- Page {p2}, chunk {cid2}: “{s2[:120]}”")
+                    evidence_items.append(f"- Page {p2}, chunk {cid2}: â€œ{s2[:120]}â€")
 
         elif intent == "objectives":
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
+            bullets = [f"â€¢ {s}" for p, cid, s in extracted_items[:4]]
+            evidence_items = [f"- Page {p}, chunk {cid}: â€œ{s[:120]}â€" for p, cid, s in extracted_items[:4]]
             if bullets:
                 md_output_parts.append("**Key Objectives:**\n" + "\n".join(bullets))
 
         elif intent in ["mechanism", "explanation"]:
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
+            bullets = [f"â€¢ {s}" for p, cid, s in extracted_items[:4]]
+            evidence_items = [f"- Page {p}, chunk {cid}: â€œ{s[:120]}â€" for p, cid, s in extracted_items[:4]]
             if bullets:
                 md_output_parts.append("**Voltage Stability & Control Mechanism:**\n" + "\n\n".join(bullets))
 
         elif intent == "comparison":
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:6]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:6]]
+            bullets = [f"â€¢ {s}" for p, cid, s in extracted_items[:6]]
+            evidence_items = [f"- Page {p}, chunk {cid}: â€œ{s[:120]}â€" for p, cid, s in extracted_items[:6]]
             if bullets:
                 md_output_parts.append(f"**Comparative Overview of {intent_obj.primary_subject} and {intent_obj.secondary_subject or 'Related Concepts'}:**\n" + "\n".join(bullets))
 
         else:
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
+            bullets = [f"â€¢ {s}" for p, cid, s in extracted_items[:4]]
+            evidence_items = [f"- Page {p}, chunk {cid}: â€œ{s[:120]}â€" for p, cid, s in extracted_items[:4]]
             if bullets:
                 md_output_parts.append(f"**Detailed Breakdown:**\n" + "\n".join(bullets))
 
@@ -613,7 +613,7 @@ class GroundedCitationVerifier:
 
         return {
             "answer": final_md,
-            "verified_quotes": [e.split('“')[-1].rstrip('”') for e in evidence_items],
+            "verified_quotes": [e.split('â€œ')[-1].rstrip('â€') for e in evidence_items],
             "confidence": 0.95
         }, True, "Universal extractive fallback successful"
 
