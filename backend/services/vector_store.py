@@ -38,7 +38,6 @@ class BM25Scorer:
                 df[word] = df.get(word, 0) + 1
 
         for word, freq in df.items():
-            # BM25 IDF with smoothing
             self.idf[word] = math.log((self.N - freq + 0.5) / (freq + 0.5) + 1)
 
     def get_scores(self, query: str) -> np.ndarray:
@@ -60,13 +59,16 @@ class BM25Scorer:
 
 class VectorStoreManager:
     """
-    Production-Grade Hybrid Vector Store Engine.
-    Combines BGE Dense Vector Cosine Similarity with BM25 Lexical Search via Reciprocal Rank Fusion (RRF).
-    Guarantees exact document candidate filtering and semantic intent matching.
+    Production-Grade Vector Store Engine.
+    - Strict Document ID & Session ID Metadata Filtering
+    - Model & Dimension Consistency Enforcement
+    - BM25 + BGE Dense Hybrid RRF Search
+    - Atomic Document Replacement & Neighbor Chunk Expansion
     """
 
-    def __init__(self, embedding_dim: int = 1024):
+    def __init__(self, embedding_dim: int = 1024, embedding_model: str = "@cf/baai/bge-large-en-v1.5"):
         self.embedding_dim = embedding_dim
+        self.embedding_model = embedding_model
         self.faiss_index = None
         self.metadata_store: List[Dict[str, Any]] = []
         self.documents_store: List[str] = []
@@ -89,6 +91,14 @@ class VectorStoreManager:
                     self.faiss_index = self.faiss_module.read_index(str(FAISS_INDEX_PATH))
                 with open(FAISS_META_PATH, "r", encoding="utf-8") as f:
                     meta_data = json.load(f)
+                    stored_model = meta_data.get("embedding_model", self.embedding_model)
+                    stored_dim = meta_data.get("embedding_dim", self.embedding_dim)
+
+                    if stored_model != self.embedding_model or stored_dim != self.embedding_dim:
+                        logger.warning(f"Embedding model mismatch detected (Stored: {stored_model}/{stored_dim} vs Current: {self.embedding_model}/{self.embedding_dim}). Initializing fresh collection.")
+                        self._clear_internal()
+                        return
+
                     self.metadata_store = meta_data.get("metadatas", [])
                     self.documents_store = meta_data.get("documents", [])
                     self.ids_store = meta_data.get("ids", [])
@@ -117,6 +127,8 @@ class VectorStoreManager:
                 self.faiss_module.write_index(self.faiss_index, str(FAISS_INDEX_PATH))
 
             meta_data = {
+                "embedding_model": self.embedding_model,
+                "embedding_dim": self.embedding_dim,
                 "ids": self.ids_store,
                 "documents": self.documents_store,
                 "metadatas": self.metadata_store,
@@ -124,7 +136,6 @@ class VectorStoreManager:
             }
             with open(FAISS_META_PATH, "w", encoding="utf-8") as f:
                 json.dump(meta_data, f, indent=2)
-            logger.info("Saved persistent vector store to disk successfully.")
         except Exception as e:
             logger.error(f"Failed to save persistent vector store: {e}")
 
@@ -152,12 +163,21 @@ class VectorStoreManager:
             self.ids_store.append(c["chunk_id"])
             self.documents_store.append(c["text"])
             self.metadata_store.append({
-                "filename": c["filename"],
-                "page_number": int(c["page_number"]),
+                "chunk_id": c["chunk_id"],
                 "chunk_index": int(c["chunk_index"]),
-                "strategy": c["strategy"],
-                "char_count": int(c["char_count"]),
-                "word_count": int(c["word_count"])
+                "document_id": c.get("document_id", ""),
+                "session_id": c.get("session_id", ""),
+                "user_id": c.get("user_id", "anonymous_user"),
+                "filename": c.get("filename", c.get("document_name", "")),
+                "document_name": c.get("document_name", c.get("filename", "")),
+                "document_version": c.get("document_version", "1.0"),
+                "page_number": int(c.get("page_number", 1)),
+                "section_title": c.get("section_title", "General Section"),
+                "strategy": c.get("strategy", "recursive"),
+                "extraction_method": c.get("extraction_method", "PyMuPDF Reading Order"),
+                "embedding_model": c.get("embedding_model", self.embedding_model),
+                "embedding_dimension": int(c.get("embedding_dimension", self.embedding_dim)),
+                "created_at": c.get("created_at", "")
             })
 
         self._save_persistent_faiss()
@@ -168,11 +188,13 @@ class VectorStoreManager:
         raw_query: str = "",
         top_k: int = 8,
         filename_filter: str = None,
+        document_id_filter: str = None,
+        session_id_filter: str = None,
         min_score: float = 0.15
     ) -> List[Dict[str, Any]]:
         """
-        Hybrid Semantic Search: Combines BGE Dense Cosine Similarity with BM25 Lexical Keyword Search
-        using Reciprocal Rank Fusion (RRF). Guarantees exact target candidate evaluation.
+        High-Precision Hybrid Search: Dense Cosine Similarity + BM25 Lexical Search.
+        Strict Metadata Filtering guarantees Document A chunks are NEVER returned for Document B.
         """
         if not self.ids_store or self.vector_matrix is None:
             return []
@@ -183,13 +205,19 @@ class VectorStoreManager:
             logger.warning(f"Embedding dimension mismatch: Query ({norm_query.shape[1]}) vs Store ({self.vector_matrix.shape[1]})")
             return []
 
-        candidate_indices = [
-            i for i, meta in enumerate(self.metadata_store)
-            if not filename_filter or meta.get("filename") == filename_filter
-        ]
+        # Strict Metadata Isolation Filter
+        candidate_indices = []
+        for i, meta in enumerate(self.metadata_store):
+            if document_id_filter and meta.get("document_id") and meta.get("document_id") != document_id_filter:
+                continue
+            if filename_filter and meta.get("filename") != filename_filter and meta.get("document_name") != filename_filter:
+                continue
+            if session_id_filter and meta.get("session_id") and meta.get("session_id") != session_id_filter:
+                continue
+            candidate_indices.append(i)
 
         if not candidate_indices:
-            candidate_indices = list(range(len(self.ids_store)))
+            return []
 
         sub_matrix = self.vector_matrix[candidate_indices]
         sub_docs = [self.documents_store[i] for i in candidate_indices]
@@ -236,10 +264,26 @@ class VectorStoreManager:
 
         return retrieved_chunks
 
-    def get_distributed_chunks(self, filename: str = None, count: int = 8) -> List[Dict[str, Any]]:
+    def get_neighbor_chunks(self, document_id: str, page_number: int, chunk_index: int) -> List[Dict[str, Any]]:
+        """
+        Retrieves adjacent chunks (chunk_index - 1 and chunk_index + 1) for context expansion.
+        """
+        neighbors = []
+        for i, meta in enumerate(self.metadata_store):
+            if meta.get("document_id") == document_id or meta.get("filename") == document_id:
+                if meta.get("page_number") == page_number and abs(meta.get("chunk_index", 0) - chunk_index) == 1:
+                    neighbors.append({
+                        "chunk_id": self.ids_store[i],
+                        "text": self.documents_store[i],
+                        "metadata": meta
+                    })
+        return neighbors
+
+    def get_distributed_chunks(self, filename: str = None, document_id: str = None, count: int = 8) -> List[Dict[str, Any]]:
         matching_indices = [
             i for i, m in enumerate(self.metadata_store)
-            if not filename or m.get("filename") == filename
+            if (not document_id or m.get("document_id") == document_id) and
+               (not filename or m.get("filename") == filename or m.get("document_name") == filename)
         ]
         if not matching_indices:
             return []
@@ -260,10 +304,14 @@ class VectorStoreManager:
                 break
         return distributed
 
-    def clear_document(self, filename: str) -> None:
+    def clear_document(self, filename: str = None, document_id: str = None) -> None:
+        """
+        Atomically removes document chunks from storage.
+        """
         keep_indices = [
             i for i, m in enumerate(self.metadata_store)
-            if m.get("filename") != filename
+            if (filename and m.get("filename") != filename and m.get("document_name") != filename) and
+               (document_id and m.get("document_id") != document_id)
         ]
         if len(keep_indices) == len(self.metadata_store):
             return
@@ -283,7 +331,7 @@ class VectorStoreManager:
 
         self._save_persistent_faiss()
 
-    def clear_all(self) -> None:
+    def _clear_internal(self):
         self.ids_store = []
         self.documents_store = []
         self.metadata_store = []
@@ -292,10 +340,13 @@ class VectorStoreManager:
             self.faiss_index = self.faiss_module.IndexFlatIP(self.embedding_dim)
         self._save_persistent_faiss()
 
+    def clear_all(self) -> None:
+        self._clear_internal()
+
     def get_stats(self) -> Dict[str, Any]:
         return {
             "total_chunks": len(self.ids_store),
-            "vector_engine": "FAISS & NumPy Hybrid Search Engine (RRF BM25 + BGE Dense)",
+            "embedding_model": self.embedding_model,
             "embedding_dim": self.embedding_dim,
             "storage_directory": str(VECTOR_DB_DIR)
         }

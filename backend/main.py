@@ -1,23 +1,28 @@
 import os
 import sys
 import time
+import hashlib
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-# Insert project root to sys.path before any relative package imports
 BASE_ROOT = Path(__file__).resolve().parent.parent
 if str(BASE_ROOT) not in sys.path:
     sys.path.insert(0, str(BASE_ROOT))
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-from backend.config import DATA_DIR, UPLOAD_DIR
-from backend.services.pdf_loader import PDFLoader
-from backend.services.chunker import TextChunker
+from backend.config import (
+    DATA_DIR,
+    MAX_UPLOAD_SIZE_BYTES,
+    MAX_PDF_PAGE_COUNT,
+    ALLOWED_FILE_EXTENSIONS
+)
+from backend.services.pdf_parser import PDFParser
+from backend.services.chunker import DocumentChunker
 from backend.services.embeddings import EmbeddingService
 from backend.services.vector_store import VectorStoreManager
 from backend.services.rag_engine import RAGEngine
@@ -28,7 +33,7 @@ from backend.services.auth_firebase import FirebaseAuthService
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DocAnalyzerBackend")
 
-app = FastAPI(title="DocAnalyzer RAG API", version="2.0.0")
+app = FastAPI(title="DocAnalyzer Enterprise RAG API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,8 +44,7 @@ app.add_middleware(
 )
 
 # Services Initialization
-pdf_loader = PDFLoader()
-chunker = TextChunker()
+chunker = DocumentChunker()
 embedding_service = EmbeddingService()
 vector_store = VectorStoreManager()
 rag_engine = RAGEngine(embedding_service=embedding_service, vector_store=vector_store)
@@ -51,15 +55,18 @@ auth_service = FirebaseAuthService()
 # Request Models
 class ProcessRequest(BaseModel):
     filename: str
+    document_id: Optional[str] = None
+    session_id: Optional[str] = None
     user_id: str = "anonymous_user"
     strategy: str = "recursive"
-    chunk_size: int = 500
-    chunk_overlap: int = 50
+    chunk_size: int = 400
+    chunk_overlap: int = 80
 
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
+    document_id: Optional[str] = None
     user_id: str = "anonymous_user"
-    query: str
+    query: str = Field(..., min_length=1)
     filename: Optional[str] = None
     system_prompt: Optional[str] = None
     top_k: int = 8
@@ -68,12 +75,22 @@ class ChatRequest(BaseModel):
 class VerifyAuthRequest(BaseModel):
     token_or_email: str
 
+def sanitize_filename(name: str) -> str:
+    """
+    Prevents Path Traversal attacks.
+    """
+    clean_name = Path(name).name
+    return re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_name)
+
+import re
+
 @app.get("/api/health")
 def health_check():
     stats = vector_store.get_stats()
     return {
         "status": "online",
-        "service": "DocAnalyzer API",
+        "service": "DocAnalyzer Enterprise RAG API",
+        "version": "3.0.0",
         "vector_stats": stats,
         "bucket_name": storage_bucket.bucket_name
     }
@@ -88,9 +105,7 @@ def verify_auth_token(req: VerifyAuthRequest):
     if not user_info:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-    # Save user profile permanently in Storage Bucket
     profile = storage_bucket.save_user_profile(user_info["email"], user_info.get("name", ""))
-
     return {"status": "authenticated", "user": user_info, "profile": profile}
 
 @app.post("/api/upload")
@@ -98,52 +113,84 @@ async def upload_document(
     file: UploadFile = File(...),
     user_id: str = Form("anonymous_user")
 ):
-    if not file.filename.lower().endswith(".pdf"):
+    safe_name = sanitize_filename(file.filename)
+    if not safe_name.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     content = await file.read()
-    clean_user_id = user_id.strip().lower() if user_id else "anonymous_user"
 
-    # Save directly to Railway Storage Bucket
+    # 1. Size Validation
+    if len(content) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=400, detail=f"File exceeds maximum upload size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB.")
+
+    # 2. Magic Header Bytes PDF Validation
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="Corrupted file: Missing valid PDF header signature.")
+
+    clean_user_id = user_id.strip().lower() if user_id else "anonymous_user"
+    doc_id = f"doc_{hashlib.sha256(content).hexdigest()[:16]}"
+
+    # Save to Storage Bucket
     bucket_result = storage_bucket.save_file(
-        filename=file.filename,
+        filename=safe_name,
         content=content,
         user_id=clean_user_id,
         content_type="application/pdf"
     )
 
-    # Extract metadata preview
-    meta = pdf_loader.extract_metadata(content, file.filename)
+    # Fast PDF Ingestion & Extraction Quality Analysis
+    parse_result = PDFParser.parse_pdf_bytes(content, safe_name)
+    report = parse_result["extraction_report"]
+
+    # 3. Maximum Page Count Validation
+    if report["total_pages"] > MAX_PDF_PAGE_COUNT:
+        raise HTTPException(status_code=400, detail=f"PDF page count ({report['total_pages']}) exceeds maximum limit of {MAX_PDF_PAGE_COUNT} pages.")
 
     return {
-        "filename": file.filename,
+        "document_id": doc_id,
+        "filename": safe_name,
         "user_id": clean_user_id,
         "size_bytes": len(content),
         "bucket_info": bucket_result,
-        "metadata": meta
+        "extraction_report": report
     }
 
 @app.post("/api/process")
 def process_document(req: ProcessRequest):
+    safe_name = sanitize_filename(req.filename)
     clean_user_id = req.user_id.strip().lower() if req.user_id else "anonymous_user"
-    pdf_bytes = storage_bucket.get_file(req.filename)
-    if not pdf_bytes:
-        raise HTTPException(status_code=404, detail=f"File '{req.filename}' not found in Storage Bucket.")
 
-    pages_data = pdf_loader.extract_pages(pdf_bytes, req.filename)
+    pdf_bytes = storage_bucket.get_file(safe_name)
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found in Storage Bucket.")
+
+    doc_id = req.document_id or f"doc_{hashlib.sha256(pdf_bytes).hexdigest()[:16]}"
+    sess_id = req.session_id or f"sess_{int(time.time())}"
+
+    # Re-upload/Replacement: Remove existing chunks for clean indexing
+    vector_store.clear_document(filename=safe_name, document_id=doc_id)
+
+    parse_result = PDFParser.parse_pdf_bytes(pdf_bytes, safe_name)
+    pages_data = parse_result["pages"]
+
     if not pages_data:
-        raise HTTPException(status_code=400, detail="Failed to extract text pages from PDF.")
+        raise HTTPException(status_code=400, detail="Failed to extract readable text pages from PDF.")
 
     chunks = chunker.create_chunks(
         pages_data=pages_data,
-        filename=req.filename,
+        filename=safe_name,
+        document_id=doc_id,
+        session_id=sess_id,
+        user_id=clean_user_id,
         strategy=req.strategy,
         chunk_size=req.chunk_size,
-        chunk_overlap=req.chunk_overlap
+        chunk_overlap=req.chunk_overlap,
+        embedding_model=embedding_service.model_name,
+        embedding_dim=embedding_service.expected_dim
     )
 
     if not chunks:
-        raise HTTPException(status_code=400, detail="No chunks created from document.")
+        raise HTTPException(status_code=400, detail="No valid chunks created from document.")
 
     texts_to_embed = [c["text"] for c in chunks]
     embeddings = embedding_service.generate_embeddings(texts_to_embed)
@@ -152,51 +199,63 @@ def process_document(req: ProcessRequest):
 
     return {
         "status": "processed",
-        "filename": req.filename,
+        "document_id": doc_id,
+        "filename": safe_name,
         "user_id": clean_user_id,
         "chunks_count": len(chunks),
-        "embedding_dim": len(embeddings[0]) if embeddings else 0
+        "embedding_dim": len(embeddings[0]) if embeddings else 0,
+        "extraction_report": parse_result["extraction_report"]
     }
 
 @app.post("/api/chat")
 def chat_query(req: ChatRequest):
     clean_user_id = req.user_id.strip().lower() if req.user_id else "anonymous_user"
     session_id = req.session_id or f"sess_{int(time.time())}"
+    safe_name = sanitize_filename(req.filename) if req.filename else None
 
-    # Fetch recent session history for follow-up resolution
+    # Fetch previous session messages for conversational reference resolution
     recent_messages = history_store.get_messages(session_id=session_id)
 
     history_store.create_session(
         session_id=session_id,
         user_id=clean_user_id,
-        filename=req.filename or "General Document",
+        document_id=req.document_id or "",
+        filename=safe_name or "General Document",
         system_prompt=req.system_prompt or ""
     )
-    history_store.add_message(session_id=session_id, role="user", content=req.query)
+    history_store.add_message(session_id=session_id, role="user", content=req.query, document_id=req.document_id or "")
 
-    # RAG Generation
+    # Grounded RAG Generation
     rag_result = rag_engine.answer_query(
         query=req.query,
-        filename=req.filename,
+        filename=safe_name,
+        document_id=req.document_id,
+        session_id=session_id,
         system_prompt=req.system_prompt,
         top_k=req.top_k,
         temperature=req.temperature,
         chat_history=recent_messages
     )
 
-    # Record Assistant Message
+    # Record Untrusted Assistant Message & Evidence Quotes
     history_store.add_message(
         session_id=session_id,
         role="assistant",
         content=rag_result["answer"],
-        sources=rag_result["sources"]
+        document_id=req.document_id or "",
+        sources=rag_result["sources"],
+        evidence_quotes=rag_result.get("verified_quotes", []),
+        is_untrusted_assistant=True
     )
 
     return {
         "session_id": session_id,
         "user_id": clean_user_id,
+        "document_id": req.document_id,
         "answer": rag_result["answer"],
         "sources": rag_result["sources"],
+        "verified_quotes": rag_result.get("verified_quotes", []),
+        "confidence": rag_result.get("confidence", 0.0),
         "retrieved_count": rag_result["retrieved_count"]
     }
 
@@ -213,9 +272,10 @@ def list_bucket_files(user_id: str):
 
 @app.delete("/api/bucket/files/{filename}")
 def delete_bucket_file(filename: str):
-    deleted = storage_bucket.delete_file(filename)
-    vector_store.clear_document(filename)
-    return {"status": "deleted" if deleted else "not_found", "filename": filename}
+    safe_name = sanitize_filename(filename)
+    deleted = storage_bucket.delete_file(safe_name)
+    vector_store.clear_document(filename=safe_name)
+    return {"status": "deleted" if deleted else "not_found", "filename": safe_name}
 
 @app.get("/api/sessions")
 def list_user_sessions(user_id: str):
