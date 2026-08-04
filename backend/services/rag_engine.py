@@ -184,17 +184,25 @@ class GroundedCitationVerifier:
                 line_words = set(re.findall(r'\w+', l_lower))
 
                 if is_subject_query:
-                    # Subject/Course Title line extraction
+                    # Header/Semester demarcation
+                    if any(sem in l_lower for sem in ["year i semester", "year ii semester", "professional elective", "open elective"]):
+                        header_title = line.strip(" |-*#").title()
+                        if header_title not in seen_quotes:
+                            seen_quotes.add(header_title)
+                            answer_lines.append(f"\n**{header_title}:**")
+
+                    # Course Title line extraction from syllabus table
                     is_course_line = (
                         re.search(r'\b[A-Z]{2,4}\d{3}[A-Z]{2}\b', line) or  # Course Code match e.g. MA101BS, EE103ES
                         re.search(r'\|\s*[A-Z0-9]+\s*\|\s*([^|]+)\|', line) or # Markdown table row match
-                        any(term in l_lower for term in ["semester", "year", "matrices", "calculus", "chemistry", "programming", "circuit", "physics", "electronics", "mechanics", "power", "machines", "systems"])
+                        any(term in l_lower for term in ["matrices", "calculus", "chemistry", "programming", "circuit", "physics", "electronics", "mechanics", "power", "machines", "systems", "workshop", "graphics", "microprocessors"])
                     )
-                    if is_course_line and not l_lower.startswith(("list of experiments", "10. write", "write a c program")):
-                        if line not in seen_quotes:
-                            seen_quotes.add(line)
-                            answer_lines.append(f"• {line}")
-                            evidence_items.append(f"- Page {page_num}, chunk {cid}: “{line[:120]}”")
+                    if is_course_line and not l_lower.startswith(("list of experiments", "10. write", "write a c program", "course objectives", "course outcomes")):
+                        clean_course = re.sub(r'^\d+\s*', '', line).strip()
+                        if clean_course not in seen_quotes and len(clean_course) > 8:
+                            seen_quotes.add(clean_course)
+                            answer_lines.append(f"• {clean_course}")
+                            evidence_items.append(f"- Page {page_num}, chunk {cid}: “{clean_course[:120]}”")
                 else:
                     if specific_terms and not (specific_terms & line_words):
                         continue
@@ -214,14 +222,14 @@ class GroundedCitationVerifier:
             }
 
         header = "### Course Structure & Subject List:\n\n" if is_subject_query else ""
-        md_response = f"## Answer\n\n{header}" + "\n".join(answer_lines[:15])
+        md_response = f"## Answer\n\n{header}" + "\n".join(answer_lines[:25])
         if evidence_items:
             md_response += "\n\n## Evidence\n\n" + "\n".join(evidence_items[:6])
 
         return {
             "answer": md_response,
             "verified_quotes": list(seen_quotes),
-            "confidence": 0.90,
+            "confidence": 0.95,
             "answerable": True
         }
 
@@ -299,29 +307,31 @@ class RAGEngine:
             }
 
         is_broad = self._is_broad_query(clean_query)
+        is_subject_listing = any(phrase in clean_query.lower() for phrase in ["list out the subjects", "list of subjects", "what are the subjects", "list the subjects", "subjects in it", "course structure", "all subjects", "subjects list"])
         search_query = self._contextualize_query(clean_query, chat_history)
 
-        q_embeddings = self.embedding_service.generate_embeddings([search_query])
         target_chunks = []
-        
-        if is_broad:
-            # For broad queries like "list out the subjects", fetch distributed chunks across first 5 pages (where course structure tables live!)
-            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, document_id=document_id, count=8)
 
-        if not target_chunks and q_embeddings:
-            target_chunks = self.vector_store.similarity_search(
-                query_embedding=q_embeddings[0],
-                raw_query=search_query,
-                top_k=top_k,
-                filename_filter=filename,
-                document_id_filter=document_id,
-                session_id_filter=session_id,
-                min_score=MIN_SIMILARITY_THRESHOLD
-            )
+        if is_subject_listing:
+            # Force retrieval of initial Course Structure pages (Pages 1 to 5)
+            target_chunks = self.vector_store.get_first_pages_chunks(filename=filename, document_id=document_id, max_pages=5)
+
+        if not target_chunks:
+            q_embeddings = self.embedding_service.generate_embeddings([search_query])
+            if q_embeddings:
+                target_chunks = self.vector_store.similarity_search(
+                    query_embedding=q_embeddings[0],
+                    raw_query=search_query,
+                    top_k=top_k,
+                    filename_filter=filename,
+                    document_id_filter=document_id,
+                    session_id_filter=session_id,
+                    min_score=MIN_SIMILARITY_THRESHOLD
+                )
 
         if not target_chunks and filename:
-            logger.info("Fallback: Retrieving distributed document chunks...")
-            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, document_id=document_id, count=5)
+            logger.info("Fallback: Retrieving initial document chunks...")
+            target_chunks = self.vector_store.get_first_pages_chunks(filename=filename, document_id=document_id, max_pages=5)
 
         if not target_chunks:
             return {

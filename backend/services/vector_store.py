@@ -63,6 +63,7 @@ class VectorStoreManager:
     - Strict Document ID & Session ID Metadata Filtering
     - Model & Dimension Consistency Enforcement
     - BM25 + BGE Dense Hybrid RRF Search
+    - Initial Pages Target Retrieval (Course Structure & TOC)
     - Atomic Document Replacement & Neighbor Chunk Expansion
     """
 
@@ -182,6 +183,23 @@ class VectorStoreManager:
 
         self._save_persistent_faiss()
 
+    def get_first_pages_chunks(self, filename: str = None, document_id: str = None, max_pages: int = 5) -> List[Dict[str, Any]]:
+        """
+        Retrieves all chunks from the first N pages (Pages 1 to max_pages) for syllabus & course structure queries.
+        """
+        first_chunks = []
+        for i, meta in enumerate(self.metadata_store):
+            if (not document_id or meta.get("document_id") == document_id) and \
+               (not filename or meta.get("filename") == filename or meta.get("document_name") == filename):
+                if meta.get("page_number", 1) <= max_pages:
+                    first_chunks.append({
+                        "chunk_id": self.ids_store[i],
+                        "text": self.documents_store[i],
+                        "metadata": meta,
+                        "similarity_score": 0.95
+                    })
+        return first_chunks
+
     def similarity_search(
         self,
         query_embedding: List[float],
@@ -192,10 +210,6 @@ class VectorStoreManager:
         session_id_filter: str = None,
         min_score: float = 0.15
     ) -> List[Dict[str, Any]]:
-        """
-        High-Precision Hybrid Search: Dense Cosine Similarity + BM25 Lexical Search.
-        Strict Metadata Filtering guarantees Document A chunks are NEVER returned for Document B.
-        """
         if not self.ids_store or self.vector_matrix is None:
             return []
 
@@ -205,7 +219,6 @@ class VectorStoreManager:
             logger.warning(f"Embedding dimension mismatch: Query ({norm_query.shape[1]}) vs Store ({self.vector_matrix.shape[1]})")
             return []
 
-        # Strict Metadata Isolation Filter
         candidate_indices = []
         for i, meta in enumerate(self.metadata_store):
             if document_id_filter and meta.get("document_id") and meta.get("document_id") != document_id_filter:
@@ -265,9 +278,6 @@ class VectorStoreManager:
         return retrieved_chunks
 
     def get_neighbor_chunks(self, document_id: str, page_number: int, chunk_index: int) -> List[Dict[str, Any]]:
-        """
-        Retrieves adjacent chunks (chunk_index - 1 and chunk_index + 1) for context expansion.
-        """
         neighbors = []
         for i, meta in enumerate(self.metadata_store):
             if meta.get("document_id") == document_id or meta.get("filename") == document_id:
@@ -305,9 +315,6 @@ class VectorStoreManager:
         return distributed
 
     def clear_document(self, filename: str = None, document_id: str = None) -> None:
-        """
-        Atomically removes document chunks from storage.
-        """
         keep_indices = [
             i for i, m in enumerate(self.metadata_store)
             if (filename and m.get("filename") != filename and m.get("document_name") != filename) and
