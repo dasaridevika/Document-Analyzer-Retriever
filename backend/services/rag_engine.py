@@ -142,16 +142,20 @@ class GroundedCitationVerifier:
     def _fallback_extractive_verification(query: str, target_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Extractive verification fallback when external LLM JSON is unparseable or offline.
+        Handles subject listing, course structures, definitions, and quantitative queries.
         """
-        q_words = set(re.findall(r'\w+', query.lower())) - {
+        lower_q = query.lower()
+        is_subject_query = any(w in lower_q for w in ["subject", "subjects", "course title", "course structure", "list of subjects", "subjects in it"])
+
+        q_words = set(re.findall(r'\w+', lower_q)) - {
             "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
-            "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where", "tell", "about"
+            "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
+            "tell", "about", "list", "out", "show", "name", "names", "it", "all"
         }
 
-        # Specific terms requiring exact match (e.g. beta, tuple, hvdc, france)
         specific_terms = {
             w for w in q_words
-            if w not in {"budget", "cost", "price", "amount", "total", "summary", "overview", "project", "system", "contract"}
+            if w not in {"budget", "cost", "price", "amount", "total", "summary", "overview", "project", "system", "contract", "subject", "subjects", "course"}
         }
 
         evidence_items = []
@@ -169,7 +173,7 @@ class GroundedCitationVerifier:
             raw_text = c.get("raw_content", c["text"])
             clean_text = re.sub(r'^\[Document:.*?\| Page \d+\]\n', '', raw_text).strip()
             
-            lines = [l.strip() for l in clean_text.splitlines() if len(l.strip()) > 15]
+            lines = [l.strip() for l in clean_text.splitlines() if len(l.strip()) > 8]
             for line in lines:
                 l_lower = line.lower()
                 if l_lower.startswith(("document:", "page:", "section:", "content:")):
@@ -179,15 +183,27 @@ class GroundedCitationVerifier:
 
                 line_words = set(re.findall(r'\w+', l_lower))
 
-                # Require specific entity terms if present in query
-                if specific_terms and not (specific_terms & line_words):
-                    continue
+                if is_subject_query:
+                    # Subject/Course Title line extraction
+                    is_course_line = (
+                        re.search(r'\b[A-Z]{2,4}\d{3}[A-Z]{2}\b', line) or  # Course Code match e.g. MA101BS, EE103ES
+                        re.search(r'\|\s*[A-Z0-9]+\s*\|\s*([^|]+)\|', line) or # Markdown table row match
+                        any(term in l_lower for term in ["semester", "year", "matrices", "calculus", "chemistry", "programming", "circuit", "physics", "electronics", "mechanics", "power", "machines", "systems"])
+                    )
+                    if is_course_line and not l_lower.startswith(("list of experiments", "10. write", "write a c program")):
+                        if line not in seen_quotes:
+                            seen_quotes.add(line)
+                            answer_lines.append(f"• {line}")
+                            evidence_items.append(f"- Page {page_num}, chunk {cid}: “{line[:120]}”")
+                else:
+                    if specific_terms and not (specific_terms & line_words):
+                        continue
 
-                if q_words and (q_words & line_words):
-                    if line not in seen_quotes:
-                        seen_quotes.add(line)
-                        answer_lines.append(f"• {line}")
-                        evidence_items.append(f"- Page {page_num}, chunk {cid}: “{line[:120]}”")
+                    if q_words and (q_words & line_words):
+                        if line not in seen_quotes:
+                            seen_quotes.add(line)
+                            answer_lines.append(f"• {line}")
+                            evidence_items.append(f"- Page {page_num}, chunk {cid}: “{line[:120]}”")
 
         if not answer_lines:
             return {
@@ -197,14 +213,15 @@ class GroundedCitationVerifier:
                 "answerable": False
             }
 
-        md_response = f"## Answer\n\n" + "\n".join(answer_lines[:6])
+        header = "### Course Structure & Subject List:\n\n" if is_subject_query else ""
+        md_response = f"## Answer\n\n{header}" + "\n".join(answer_lines[:15])
         if evidence_items:
-            md_response += "\n\n## Evidence\n\n" + "\n".join(evidence_items[:4])
+            md_response += "\n\n## Evidence\n\n" + "\n".join(evidence_items[:6])
 
         return {
             "answer": md_response,
             "verified_quotes": list(seen_quotes),
-            "confidence": 0.85,
+            "confidence": 0.90,
             "answerable": True
         }
 
@@ -234,9 +251,11 @@ class RAGEngine:
             "what is this about", "explain this", "tell me about this", "explain the document",
             "what is this document", "what does this document contain", "table of contents",
             "full document", "executive summary", "main topics", "key points", "what is this",
-            "tell me about the document", "describe the document", "summarize it", "what is its all about"
+            "tell me about the document", "describe the document", "summarize it", "what is its all about",
+            "list out the subjects", "list of subjects", "what are the subjects", "list the subjects",
+            "subjects in it", "course structure", "all subjects", "subjects list"
         ]
-        return any(phrase in lower_q for phrase in broad_phrases) or lower_q in ["summarize it", "summarize", "explain", "describe", "overview"]
+        return any(phrase in lower_q for phrase in broad_phrases) or lower_q in ["summarize it", "summarize", "explain", "describe", "overview", "subjects"]
 
     def _contextualize_query(self, query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> str:
         if not chat_history:
@@ -284,7 +303,12 @@ class RAGEngine:
 
         q_embeddings = self.embedding_service.generate_embeddings([search_query])
         target_chunks = []
-        if q_embeddings:
+        
+        if is_broad:
+            # For broad queries like "list out the subjects", fetch distributed chunks across first 5 pages (where course structure tables live!)
+            target_chunks = self.vector_store.get_distributed_chunks(filename=filename, document_id=document_id, count=8)
+
+        if not target_chunks and q_embeddings:
             target_chunks = self.vector_store.similarity_search(
                 query_embedding=q_embeddings[0],
                 raw_query=search_query,
