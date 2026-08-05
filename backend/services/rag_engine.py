@@ -1562,8 +1562,8 @@ class EnterpriseRAGPipeline:
         if not candidate_indices:
             return []
 
-        # Small document optimization: if <= 8 chunks, return everything sorted by page number
-        if len(candidate_indices) <= 8:
+        # Small document optimization: if <= 12 chunks, return everything sorted by page number
+        if len(candidate_indices) <= 12:
             all_chunks = []
             for idx in candidate_indices:
                 all_chunks.append({
@@ -1638,9 +1638,25 @@ class EnterpriseRAGPipeline:
                     "similarity_score": 1.0,
                     "rrf_score": 1.0
                 })
-            fallback_chunks.sort(key=lambda x: x["metadata"].get("page_number", 0))
-            return fallback_chunks
+            retrieved_chunks = fallback_chunks
 
+        # Ensure Chunk 0 (Metadata / Page 1 Header) is always included for context
+        if candidate_indices:
+            page_1_idx = candidate_indices[0]
+            page_1_cid = vector_store.ids_store[page_1_idx]
+            retrieved_cids = {c["chunk_id"] for c in retrieved_chunks}
+            if page_1_cid not in retrieved_cids:
+                page_1_chunk = {
+                    "chunk_id": page_1_cid,
+                    "text": vector_store.documents_store[page_1_idx],
+                    "metadata": vector_store.metadata_store[page_1_idx],
+                    "similarity_score": 0.5,
+                    "rrf_score": 0.5
+                }
+                retrieved_chunks.insert(0, page_1_chunk)
+
+        # Sort retrieved chunks in natural document order
+        retrieved_chunks.sort(key=lambda x: x["metadata"].get("page_number", 0))
         return retrieved_chunks[:top_k]
 
     @staticmethod
