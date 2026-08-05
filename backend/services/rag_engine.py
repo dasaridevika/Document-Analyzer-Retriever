@@ -1255,7 +1255,7 @@ class EnterpriseRAGPipeline:
         self.api_token = CLOUDFLARE_API_TOKEN
         self.local_llm_base_url = LOCAL_LLM_BASE_URL
         self.local_llm_model = LOCAL_LLM_MODEL
-        self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct-fp8"
+        self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/zai-org/glm-4.7-flash"
         self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
     # Document-Level Retrieval APIs
