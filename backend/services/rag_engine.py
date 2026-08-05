@@ -1028,7 +1028,9 @@ class GroundedCitationVerifier:
             "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
             "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page",
             "summarise", "summarize", "given", "document", "explain", "discussed", "on", "with", "at",
-            "by", "from", "up", "into", "over", "under", "above", "below"
+            "by", "from", "up", "into", "over", "under", "above", "below",
+            "i", "me", "my", "we", "us", "our", "you", "your", "he", "him", "his", "she", "her", "they", "them", "their",
+            "have", "has", "had", "do", "does", "did", "was", "were", "been", "being", "be"
         }
         generic_nouns = {
             "project", "budget", "system", "value", "key", "code", "password", "prompt"
@@ -1051,7 +1053,7 @@ class GroundedCitationVerifier:
 
         # Skills & Strengths mapping
         if any(w in lower_q_raw for w in ["strength", "skill", "expertise", "specialist", "knows", "strengths", "skills", "proficient"]):
-            expanded_match_words.update(["skills", "strengths", "summary", "experienced", "proficient", "excel", "power bi", "python", "cyber", "security", "ml", "ai", "core"])
+            expanded_match_words.update(["skills", "strengths", "technical", "languages", "programming", "databases", "frameworks", "tools", "excel", "python", "java", "c++", "mysql", "mongodb"])
 
         # Contact / Info mapping
         if any(w in lower_q_raw for w in ["contact", "email", "phone", "mobile", "github", "linkedin", "details", "reach", "write", "call", "communication", "info", "information"]):
@@ -1151,6 +1153,27 @@ class GroundedCitationVerifier:
                         intent_bonus += 0.35
                     if any(k in s_lower for k in ["defined as", "refers to"]):
                         intent_bonus -= 0.20
+
+                    # Boost skills sentences if user queried about skills
+                    if any(w in lower_q for w in ["skill", "skills", "strength", "strengths", "expertise"]):
+                        if any(k in s_lower for k in ["skills", "strengths", "technical", "languages", "programming", "databases", "frameworks", "tools"]):
+                            intent_bonus += 0.45
+                        if any(k in s_lower for k in ["education", "b.tech", "jntu", "experience", "projects", "attendance", "charging"]):
+                            intent_bonus -= 0.30
+
+                    # Boost education sentences if user queried about education
+                    if any(w in lower_q for w in ["education", "study", "degree", "university", "college", "school"]):
+                        if any(k in s_lower for k in ["education", "b.tech", "degree", "university", "college", "school", "intermediate", "secondary"]):
+                            intent_bonus += 0.45
+                        if any(k in s_lower for k in ["skills:", "programming :", "databases :", "experience"]):
+                            intent_bonus -= 0.30
+
+                    # Boost project sentences if user queried about projects
+                    if any(w in lower_q for w in ["project", "projects"]):
+                        if any(k in s_lower for k in ["project", "projects", "developed", "built", "implemented"]):
+                            intent_bonus += 0.45
+                        if any(k in s_lower for k in ["education", "b.tech", "skills:", "languages :"]):
+                            intent_bonus -= 0.30
                 
                 final_score = overlap_score + intent_bonus
                 extracted_items.append((page_num, cid, s_clean, final_score))
@@ -1179,6 +1202,12 @@ class GroundedCitationVerifier:
             extracted_items.sort(key=lambda x: (x[0], x[1]))
         else:
             extracted_items.sort(key=lambda x: x[3], reverse=True)
+
+        # Filter out low-scoring items if we have high-scoring matches to keep results highly specific
+        if extracted_items and intent not in ["summary", "unknown"]:
+            max_score = max(x[3] for x in extracted_items)
+            if max_score >= 0.4:
+                extracted_items = [x for x in extracted_items if x[3] >= max_score * 0.5]
 
         # Map back to standard tuple structure (page_num, cid, sentence_text)
         extracted_items = [(x[0], x[1], x[2]) for x in extracted_items]
