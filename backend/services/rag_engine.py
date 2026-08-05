@@ -323,14 +323,9 @@ def _extract_json_payload(data: Any) -> Optional[Dict[str, Any]]:
                 if res:
                     return res
             elif isinstance(val, str):
-                try:
-                    match = re.search(r'\{.*\}', val, re.DOTALL)
-                    if match:
-                        parsed = json.loads(match.group(0))
-                        if isinstance(parsed, dict) and "answerable" in parsed:
-                            return parsed
-                except Exception:
-                    pass
+                res = _extract_json_payload(val)
+                if res:
+                    return res
 
     elif isinstance(data, str):
         try:
@@ -341,6 +336,35 @@ def _extract_json_payload(data: Any) -> Optional[Dict[str, Any]]:
                     return parsed
         except Exception:
             pass
+
+        # Fallback regex parsing for broken JSON strings
+        ans_match = re.search(r'"answer"\s*:\s*"(.*?)"', data, re.DOTALL)
+        if ans_match:
+            try:
+                ans_str = ans_match.group(1).encode().decode('unicode-escape')
+                return {
+                    "answerable": True,
+                    "answer": ans_str,
+                    "parts": [],
+                    "confidence": 0.85
+                }
+            except Exception:
+                return {
+                    "answerable": True,
+                    "answer": ans_match.group(1),
+                    "parts": [],
+                    "confidence": 0.85
+                }
+
+        # Generative Fallback: If it is conversational prose, wrap it as the answer directly
+        clean_text = data.strip()
+        if clean_text and not clean_text.startswith("{") and len(clean_text) > 30:
+            return {
+                "answerable": True,
+                "answer": clean_text,
+                "parts": [],
+                "confidence": 0.85
+            }
 
     return None
 
