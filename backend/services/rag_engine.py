@@ -205,15 +205,23 @@ class LLMSynthesizer:
 # Adaptive Zero-Boilerplate Prompting
 # ============================================================================
 
-SYSTEM_PROMPT = """You are an expert AI Document Assistant. Your objective is to answer the user's query with maximum precision, intelligence, and adaptability, strictly using the provided Context.
+SYSTEM_PROMPT = """You are an intelligent, high-productivity AI Document Assistant and Domain Expert. Your objective is to address the user's true intent accurately, adaptively, and thoughtfully.
 
 OPERATIONAL INSTRUCTIONS:
-1. ADAPTIVE FORMATTING: Directly follow whatever format, tone, style, or structure the user requests (e.g., Markdown tables, JSON, bullet points, executive summaries, step-by-step guides, code, or formal essays). Never wrap your answer in rigid, repeating templates or forced section headers unless requested.
-2. CONTEXT ACCURACY: Base your response exclusively on the facts, data, and details present in the Context. Synthesize information across multiple context chunks when answering broad or high-level queries (e.g., summaries, key takeaways, cross-page analysis).
-3. ZERO HALLUCINATION & MISSING DATA: If the provided Context does not contain enough information to answer the question, state clearly and concisely what specific information is missing from the document. Never invent or infer unstated facts.
-4. DIRECT DELIVERY: Begin your response immediately with the requested content. Omit conversational filler, polite intros ("Sure, here is your answer"), fluff, and repetitive meta-commentary.
+1. HYBRID KNOWLEDGE & INTENT UNDERSTANDING:
+   - Always prioritize and anchor your response in the provided Document Context.
+   - If the user asks for analysis, recommendations, role suitability, improvements, or domain knowledge that goes beyond the explicit wording of the PDF, USE YOUR GENERAL KNOWLEDGE to answer intelligently based on the context provided.
+   - Never refuse to answer simply because a word or exact sentence is not in the text. Deduce, extrapolate, and assist the user with full professional and technical domain reasoning.
 
-CONTEXT:
+2. ADAPTIVE FORMATTING:
+   - Format your response EXACTLY as the user requests (e.g., bullet points, Markdown tables, JSON, executive summaries, step-by-step guides, code, or formal paragraphs).
+   - Do not wrap responses in rigid, repeating templates or forced section headers unless asked.
+
+3. DIRECT & ACTIONABLE DELIVERY:
+   - Begin immediately with the answer. Omit conversational fluff, filler ("Based on the uploaded document..."), and polite introductions.
+   - If you make a deduction using external background knowledge, frame it clearly (e.g., "Based on his background in Python and AWS, suitable roles include...").
+
+DOCUMENT CONTEXT:
 {context_text}"""
 
 def build_llm_messages(query: str, retrieved_chunks: list) -> list:
@@ -1557,6 +1565,20 @@ class EnterpriseRAGPipeline:
         candidate_indices = sorted(list(candidates))
         if not candidate_indices:
             return []
+
+        # Small document optimization: if <= 8 chunks, return everything sorted by page number
+        if len(candidate_indices) <= 8:
+            all_chunks = []
+            for idx in candidate_indices:
+                all_chunks.append({
+                    "chunk_id": vector_store.ids_store[idx],
+                    "text": vector_store.documents_store[idx],
+                    "metadata": vector_store.metadata_store[idx],
+                    "similarity_score": 1.0,
+                    "rrf_score": 1.0
+                })
+            all_chunks.sort(key=lambda x: x["metadata"].get("page_number", 0))
+            return all_chunks[:top_k]
 
         # 1. Dense Cosine Similarity Ranks
         sub_matrix = vector_store.vector_matrix[candidate_indices]
