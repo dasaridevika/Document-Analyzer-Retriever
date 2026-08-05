@@ -1692,9 +1692,11 @@ class EnterpriseRAGPipeline:
         # 1. Try Cloudflare Worker AI Base URL
         if self.worker_base_url:
             try:
+                logger.info(f"--- CONTEXT BEING SENT TO WORKER ---\n{context[:500]}")
                 resp = requests.post(f"{self.worker_base_url}/analyze", json={
                     "query": query,
                     "text": context,
+                    "context": context,
                     "system_prompt": combined_system,
                     "json_mode": True,
                     "temperature": temperature
