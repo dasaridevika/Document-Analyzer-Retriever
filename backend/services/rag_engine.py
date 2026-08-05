@@ -1029,6 +1029,18 @@ class GroundedCitationVerifier:
         if any(w in lower_q_raw for w in ["strength", "skill", "expertise", "specialist", "knows", "strengths", "skills", "proficient"]):
             expanded_match_words.update(["skills", "strengths", "summary", "experienced", "proficient", "excel", "power bi", "python", "cyber", "security", "ml", "ai", "core"])
 
+        # Contact / Info mapping
+        if any(w in lower_q_raw for w in ["contact", "email", "phone", "mobile", "github", "linkedin", "details", "reach", "write", "call", "communication", "info", "information"]):
+            expanded_match_words.update(["gmail.com", "telangana", "hyderabad", "khammam", "phone", "linkedin", "github", "email", "address", "contact", "ranchi", "peddapalli", "morthad", "nizamabad"])
+
+        # Projects mapping
+        if any(w in lower_q_raw for w in ["project", "projects", "work", "created", "built", "developed", "implemented", "designed"]):
+            expanded_match_words.update(["project", "projects", "fashion", "recommender", "vulnerability", "assessment", "vapt", "penetration", "testing", "design", "develop", "implement", "build"])
+
+        # Experience & Internships mapping
+        if any(w in lower_q_raw for w in ["experience", "internship", "internships", "work", "intern", "history", "job", "role", "roles", "suit", "career"]):
+            expanded_match_words.update(["internship", "intern", "experience", "nielit", "innovate", "apcsip", "sure", "trust", "work", "role", "roles", "cyber", "security", "cloud", "computing"])
+
         extracted_items = []
         seen_quotes: Set[str] = set()
 
