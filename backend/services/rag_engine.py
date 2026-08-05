@@ -1427,6 +1427,24 @@ class EnterpriseRAGPipeline:
         if not all_candidate_chunks and filename:
             all_candidate_chunks = self.retrieve_document(filename=filename, document_id=document_id, max_pages=5)
 
+        # Safeguard: always append the first 2 chunks of the document (typically introduction/profile/header/skills)
+        # to guarantee the LLM has general grounding context for abstract or offline fallback queries.
+        if document_id and self.vector_store.ids_store:
+            doc_indices = self.vector_store._doc_id_to_indices.get(document_id, [])
+            if doc_indices:
+                seen_cids = {c["chunk_id"] for c in all_candidate_chunks}
+                sorted_indices = sorted(doc_indices)
+                for idx in sorted_indices[:2]:
+                    cid = self.vector_store.ids_store[idx]
+                    if cid not in seen_cids:
+                        all_candidate_chunks.append({
+                            "chunk_id": cid,
+                            "text": self.vector_store.documents_store[idx],
+                            "metadata": self.vector_store.metadata_store[idx],
+                            "similarity_score": 0.4,
+                            "rrf_score": 0.4
+                        })
+
         # Stage 7: Cross-Encoder Reranking
         reranked_chunks = CrossEncoderReranker.rerank(resolved_q, all_candidate_chunks, intent_type=intent_obj.intent)
         trace.retrieved_chunks = [
@@ -1682,6 +1700,22 @@ class EnterpriseRAGPipeline:
         if is_broad:
             search_query = self._generate_hyde_query(sub_q)
             logger.info(f"HyDE query generated: {search_query}")
+        else:
+            # Intent-Guided Query Expansion
+            lower_sub_q = sub_q.lower()
+            expansion_terms = ""
+            if any(w in lower_sub_q for w in ["skill", "know", "experience", "tool", "proficient", "language", "framework", "database", "work", "job", "role"]):
+                expansion_terms = "candidate technical skills, programming languages, experience, frameworks, job history"
+            elif any(w in lower_sub_q for w in ["education", "study", "studied", "major", "degree", "university", "college", "school", "graduation", "graduated"]):
+                expansion_terms = "education background, degree, university, graduation, academic qualifications"
+            elif any(w in lower_sub_q for w in ["project", "projects", "built", "developed", "designed", "implemented", "created"]):
+                expansion_terms = "projects, designed, implemented, developed system, technology stack"
+            elif any(w in lower_sub_q for w in ["contact", "email", "phone", "location", "live", "address", "from", "reach"]):
+                expansion_terms = "contact details, email address, phone number, location, address"
+
+            if expansion_terms:
+                search_query = f"{sub_q} {expansion_terms}"
+                logger.info(f"Intent-Guided Query Expansion: {search_query}")
 
         q_embeddings = self.embedding_service.generate_embeddings([search_query])
         if not q_embeddings:
@@ -1706,7 +1740,7 @@ class EnterpriseRAGPipeline:
 
         # 2. Lexical BM25 Ranks
         candidate_ids = [vector_store.ids_store[idx] for idx in candidate_indices]
-        bm25_scores = vector_store.bm25_index.score_candidates(sub_q, candidate_ids)
+        bm25_scores = vector_store.bm25_index.score_candidates(search_query, candidate_ids)
 
         sparse_list = []
         for idx in candidate_indices:
