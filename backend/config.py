@@ -76,7 +76,7 @@ LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "")
 
 # Models
 CLOUDFLARE_EMBEDDING_MODEL = os.getenv("CLOUDFLARE_EMBEDDING_MODEL", "@cf/baai/bge-large-en-v1.5")
-CLOUDFLARE_LLM_MODEL = os.getenv("CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3.1-8b-instruct")
+CLOUDFLARE_LLM_MODEL = os.getenv("CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3.1-8b-instruct-fp8")
 
 # Host & Port
 BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")

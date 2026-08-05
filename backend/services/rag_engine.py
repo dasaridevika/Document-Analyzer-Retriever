@@ -585,7 +585,7 @@ class ConversationResolver:
                 is_prev_summary = any(x in prev_q_lower for x in ["summarise", "summarize", "summary", "overview", "pdf about"])
                 
                 if not is_prev_summary:
-                    pronouns = {"he", "she", "it", "they", "him", "her", "them", "his", "their", "its", "this", "that", "these", "those", "himself", "herself", "itself"}
+                    pronouns = {"it", "this", "that", "these", "those", "itself", "its"}
                     words = set(re.findall(r'\w+', lower_q))
                     has_pronouns = bool(words & pronouns)
                     is_tiny_fragment = len(re.findall(r'\w+', query)) <= 3
@@ -1180,7 +1180,7 @@ class EnterpriseRAGPipeline:
         self.api_token = CLOUDFLARE_API_TOKEN
         self.local_llm_base_url = LOCAL_LLM_BASE_URL
         self.local_llm_model = LOCAL_LLM_MODEL
-        self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct"
+        self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct-fp8"
         self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
     # Document-Level Retrieval APIs

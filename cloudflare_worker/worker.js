@@ -151,14 +151,16 @@ ${cleanContext}`;
         const temperature = typeof body.temperature === 'number' ? body.temperature : 0.1;
 
         let llmResponse;
+        let chosenModel = "@cf/meta/llama-3.1-8b-instruct-fp8";
         try {
-          llmResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+          llmResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
             messages: messages,
             temperature: temperature,
             max_tokens: 3000,
           });
         } catch (mErr) {
-          llmResponse = await env.AI.run("@cf/meta/llama-8b-instruct", {
+          chosenModel = "@cf/meta/llama-3.2-3b-instruct";
+          llmResponse = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
             messages: messages,
             temperature: temperature,
             max_tokens: 3000,
@@ -172,7 +174,7 @@ ${cleanContext}`;
         return new Response(
           JSON.stringify({
             success: true,
-            model: "@cf/meta/llama-3.1-8b-instruct",
+            model: chosenModel,
             result: llmResponse,
             response: responseText.trim(),
           }),
