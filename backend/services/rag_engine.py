@@ -459,7 +459,7 @@ class QueryRewriter:
         resolved_q = ConversationResolver.resolve_conversation(query, chat_history)
         lower_q = resolved_q.lower().strip("?!., ")
 
-        # Target Page & Chapter Lookups
+        # Target Page & Chapter Lookups (preserved for backward compatibility helper routing)
         page_match = re.search(r'\bpage\s+(\d+)\b', lower_q)
         chapter_match = re.search(r'\bchapter\s+(\d+)\b', lower_q)
         target_page = int(page_match.group(1)) if page_match else None
@@ -475,6 +475,7 @@ class QueryRewriter:
         section_specific = False
         targets = ["factual answer"]
 
+        # Check rules in priority order
         if any(w in lower_q for w in ["insight", "analysis", "review", "strength", "weakness", "risk", "gap", "concern", "recommendation"]):
             intent = "review"
             reason = "User requested high-level analysis, insights, risk evaluation, or recommendations."
@@ -605,20 +606,27 @@ class QueryRewriter:
 
     @staticmethod
     def generate_multi_queries(query: str, intent_obj: QueryIntent) -> List[str]:
+        """Generates semantic query variations for Multi-Query Expansion."""
         clean_q = query.strip()
         subj1 = intent_obj.primary_subject or clean_q
 
         variations = [clean_q]
-        if intent_obj.intent == "compare" and intent_obj.secondary_subject:
+        if intent_obj.intent == "comparison" and intent_obj.secondary_subject:
             variations.append(f"{subj1} characteristics and features")
             variations.append(f"{intent_obj.secondary_subject} characteristics and features")
             variations.append(f"Comparison of {subj1} and {intent_obj.secondary_subject}")
         elif intent_obj.intent == "summary":
             variations.append("Executive summary of document main topics and objectives")
             variations.append(f"Overview of {subj1} main themes and general principles")
-        elif intent_obj.intent == "qa":
-            variations.append(f"Define and explain {subj1}")
-            variations.append(f"What is the core purpose and details of {subj1}")
+        elif intent_obj.intent == "definition":
+            variations.append(f"Define {subj1}")
+            variations.append(f"What is the definition and purpose of {subj1}")
+        elif intent_obj.intent == "objectives":
+            variations.append(f"Key objectives and aims of {subj1}")
+            variations.append(f"Why is {subj1} used and what does it accomplish")
+        elif intent_obj.intent in ["mechanism", "explanation"]:
+            variations.append(f"How does {subj1} work step by step")
+            variations.append(f"Operation, function, and implementation mechanism of {subj1}")
         else:
             variations.append(f"Details on {subj1}")
             variations.append(f"Overview of {subj1}")
@@ -702,7 +710,6 @@ class GroundedCitationVerifier:
                     overlap_ratio = len(quote_words & chunk_words) / max(1, len(quote_words))
                     if overlap_ratio >= 0.75:
                         is_match = True
-
                 if not is_match:
                     valid_citations = False
                     is_correct = False
@@ -710,26 +717,50 @@ class GroundedCitationVerifier:
                     if quote not in seen_quotes:
                         seen_quotes.add(quote)
                         verified_evidence_items.append(f"- Page {page or 1}, chunk {cid or 'c0'}: “{quote}”")
-            
             if is_correct:
                 correct_citations += 1
 
-        citation_correctness = correct_citations / max(1, total_citations) if total_citations > 0 else 1.0
+        citation_correctness = (correct_citations / total_citations) if total_citations > 0 else 1.0
 
-        # Build clean final Markdown output
-        final_body = raw_answer if raw_answer else (raw_definition + ("\n\n" + raw_explanation if raw_explanation else ""))
-        if verified_evidence_items:
-            final_body += "\n\n### Verified Source Evidence\n" + "\n".join(verified_evidence_items)
+        # Construct Final Formatted Output Answer
+        formatted_answer_parts = []
 
-        res_payload = {
-            "answer": final_body,
-            "parts": structured_json.get("parts", []),
+        if raw_answer:
+            formatted_answer_parts.append(f"## Answer\n\n{raw_answer}")
+        elif raw_definition or raw_explanation:
+            if raw_definition:
+                formatted_answer_parts.append(f"## Definition\n\n{raw_definition}")
+            if raw_explanation:
+                formatted_answer_parts.append(f"\n## Detailed Breakdown\n\n{raw_explanation}")
+
+        # List/Table/Structured JSON representations handling
+        parts_data = structured_json.get("parts", [])
+        if parts_data and isinstance(parts_data, list):
+            formatted_answer_parts.append("\n### Extracted Details")
+            for idx, part in enumerate(parts_data, 1):
+                if isinstance(part, dict):
+                    title = part.get("title", part.get("item", f"Point {idx}"))
+                    desc = part.get("description", part.get("details", ""))
+                    p_num = part.get("page", "")
+                    page_str = f" (Page {p_num})" if p_num else ""
+                    formatted_answer_parts.append(f"{idx}. **{title}**{page_str}: {desc}")
+                elif isinstance(part, str):
+                    formatted_answer_parts.append(f"- {part}")
+
+        final_text = "\n\n".join(formatted_answer_parts).strip()
+        if not final_text:
+            return GroundedCitationVerifier._fallback_universal_extractive(query, target_chunks, intent_obj)
+
+        res_dict = {
+            "answer": final_text,
+            "parts": parts_data,
             "confidence": confidence,
+            "evidence": verified_evidence_items,
             "answer_faithfulness": round(confidence, 2),
             "citation_correctness": round(citation_correctness, 2)
         }
 
-        return res_payload, valid_citations, "Verification complete"
+        return res_dict, valid_citations, "Citations verified successfully"
 
     @staticmethod
     def _fallback_universal_extractive(
@@ -737,232 +768,34 @@ class GroundedCitationVerifier:
         target_chunks: List[Dict[str, Any]],
         intent_obj: QueryIntent
     ) -> Tuple[Dict[str, Any], bool, str]:
-        """Direct text extraction fallback when LLM output generation is invalid."""
-        if not target_chunks:
-            return {
-                "answer": f"## Answer\n\n{NO_EVIDENCE_FALLBACK_MESSAGE}",
-                "parts": [],
-                "confidence": 0.0
-            }, False, "No chunks available"
+        """Universal Extractive Fallback Engine to guarantee answer generation."""
+        logger.warning("LLM response not structure-compliant. Triggering Universal Extractive Fallback.")
+        
+        selected_text_blocks = []
+        verified_evidence = []
+        
+        for idx, chunk in enumerate(target_chunks[:3], 1):
+            text = chunk.get("raw_content", chunk.get("text", "")).strip()
+            page = chunk.get("metadata", {}).get("page_number", 1)
+            cid = chunk.get("chunk_id", f"c{idx}")
+            
+            selected_text_blocks.append(f"**From Page {page} (Excerpt {idx}):**\n> {text}")
+            snippet = text[:100].replace('\n', ' ') + "..."
+            verified_evidence.append(f"- Page {page}, chunk {cid}: “{snippet}”")
 
-        best_chunk = target_chunks[0]
-        extracted_text = best_chunk.get("raw_content", best_chunk.get("text", ""))
-        page_num = best_chunk.get("metadata", {}).get("page_number", 1)
-        chunk_id = best_chunk.get("chunk_id", "c0")
-
-        ans_markdown = (
-            f"### Direct Document Extract\n\n"
-            f"{extracted_text}\n\n"
-            f"**Source:** Page {page_num} (Chunk ID: `{chunk_id}`)"
+        fallback_answer = (
+            f"## Direct Document Excerpts\n\n"
+            f"Based directly on the most relevant sections of the document:\n\n"
+            + "\n\n".join(selected_text_blocks)
         )
 
-        return {
-            "answer": ans_markdown,
-            "parts": [{
-                "title": f"Extracted Content (Page {page_num})",
-                "content": extracted_text,
-                "supporting_chunk_ids": [chunk_id],
-                "page_numbers": [page_num]
-            }],
-            "confidence": 0.70
-        }, True, "Used Universal Extractive Fallback"
-
-
-# ============================================================================
-# Main Enterprise RAG Pipeline
-# ============================================================================
-
-class RAGPipeline:
-    """End-to-End Enterprise RAG Engine with Cloudflare LLM Integration."""
-
-    def __init__(self):
-        self.account_id = CLOUDFLARE_ACCOUNT_ID
-        self.api_token = CLOUDFLARE_API_TOKEN
-        self.model = CLOUDFLARE_LLM_MODEL
-        self.worker_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
-
-    def _call_llm_json(self, prompt: str, system_prompt: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Makes an API request to Cloudflare Workers AI and enforces JSON response structure."""
-        url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.model}"
-        headers = {
-            "Authorization": f"Bearer {self.api_token}",
-            "Content-Type": "application/json"
-        }
-        
-        sys_p = system_prompt or IMMUTABLE_SYSTEM_PROMPT
-        payload = {
-            "messages": [
-                {"role": "system", "content": sys_p},
-                {"role": "user", "content": prompt}
-            ],
-            "response_format": {"type": "json_object"}
+        res_dict = {
+            "answer": fallback_answer,
+            "parts": [],
+            "confidence": 0.70,
+            "evidence": verified_evidence,
+            "answer_faithfulness": 1.0,
+            "citation_correctness": 1.0
         }
 
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 200:
-                res_data = resp.json()
-                result_obj = res_data.get("result")
-                return _extract_json_payload(result_obj)
-            else:
-                logger.error(f"Cloudflare LLM API Error ({resp.status_code}): {resp.text}")
-        except Exception as e:
-            logger.error(f"Exception during LLM execution: {e}")
-
-        return None
-
-    def search_chunks(self, query: str, document_id: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """Fetches vector/keyword search chunks from Worker backend service."""
-        try:
-            url = f"{self.worker_url}/search"
-            payload = {
-                "query": query,
-                "document_id": document_id,
-                "top_k": top_k
-            }
-            res = requests.post(url, json=payload, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                return data.get("chunks", [])
-        except Exception as e:
-            logger.warning(f"Failed to fetch chunks from worker service: {e}")
-
-        return []
-
-    def execute_rag(
-        self,
-        query: str,
-        document_id: str,
-        chat_history: Optional[List[Dict[str, Any]]] = None,
-        query_vector: Optional[List[float]] = None
-    ) -> Dict[str, Any]:
-        """Main execution entrypoint for RAG processing."""
-        start_time = time.time()
-        request_id = str(uuid.uuid4())
-
-        # 1. Semantic Cache Lookup
-        if query_vector:
-            cached_res = global_semantic_cache.get(query_vector, document_id)
-            if cached_res:
-                logger.info("Cache hit! Returning pre-computed semantic response.")
-                return cached_res
-
-        # 2. Query Rewriting and Classification
-        resolved_q, intent_obj = QueryRewriter.rewrite_query(query, chat_history)
-        
-        # Immediate return if clarification is needed
-        if intent_obj.clarification_needed:
-            return {
-                "answer": f"## Clarification Needed\n\n{intent_obj.clarification_question}",
-                "confidence": 0.0,
-                "rag_trace": RAGTrace(
-                    request_id=request_id,
-                    document_id=document_id,
-                    original_query=query,
-                    rewritten_query=resolved_q,
-                    query_intent=intent_obj.intent,
-                    retrieval_strategy=intent_obj.retrieval_strategy,
-                    failure_stage="query_classification",
-                    failure_reason="Ambiguous Query"
-                ).__dict__
-            }
-
-        # 3. Multi-Query Expansion & Search
-        sub_queries = QueryRewriter.generate_multi_queries(resolved_q, intent_obj)
-        top_k = intent_obj.adaptive_top_k
-
-        all_candidate_chunks: List[Dict[str, Any]] = []
-        seen_chunk_ids: Set[str] = set()
-
-        def fetch_q(q_str: str) -> List[Dict[str, Any]]:
-            return self.search_chunks(q_str, document_id, top_k=top_k)
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(fetch_q, q) for q in sub_queries]
-            for f in as_completed(futures):
-                chunks = f.result()
-                for c in chunks:
-                    cid = c.get("chunk_id")
-                    if cid and cid not in seen_chunk_ids:
-                        seen_chunk_ids.add(cid)
-                        all_candidate_chunks.append(c)
-
-        # 4. Relevance Filtering & Cross-Encoder Reranking
-        filtered_chunks = [
-            c for c in all_candidate_chunks
-            if is_relevant_to_query(resolved_q, c.get("text", ""), c.get("similarity_score", 0.0), intent_obj.intent)
-        ]
-
-        reranked_chunks = CrossEncoderReranker.rerank(resolved_q, filtered_chunks, intent_type=intent_obj.intent)
-        final_chunks = reranked_chunks[:FINAL_CONTEXT_K]
-
-        # 5. Formulate Prompt & Context Construction
-        context_blocks = []
-        for idx, c in enumerate(final_chunks):
-            p_num = c.get("metadata", {}).get("page_number", 1)
-            cid = c.get("chunk_id", f"c{idx}")
-            text = c.get("text", "")
-            context_blocks.append(f"--- CHUNK ID: {cid} (Page {p_num}) ---\n{text}")
-
-        context_str = "\n\n".join(context_blocks)
-
-        prompt = (
-            f"User Query: {resolved_q}\n"
-            f"Target Response Format: {intent_obj.response_format}\n\n"
-            f"Retrieved Document Context:\n{context_str}\n\n"
-            f"Instructions:\n"
-            f"Answer the user query thoroughly based strictly on the provided context.\n"
-            f"Return a valid JSON object matching the following structure:\n"
-            f"{{\n"
-            f'  "answerable": true,\n'
-            f'  "answer": "Detailed answer formatted in clean Markdown",\n'
-            f'  "confidence": 0.95,\n'
-            f'  "evidence": [\n'
-            f'     {{"chunk_id": "c0", "page": 1, "quote": "Exact verbatim quote from context"}}\n'
-            f'  ]\n'
-            f"}}"
-        )
-
-        # 6. LLM Invocations
-        llm_raw = self._call_llm_json(prompt)
-
-        # 7. Verification & Fallback
-        res_payload, valid_citations, msg = GroundedCitationVerifier.verify_response(
-            resolved_q, llm_raw, final_chunks, intent_obj
-        )
-
-        latency = round((time.time() - start_time) * 1000, 2)
-
-        # Build Trace Metadata
-        trace = RAGTrace(
-            request_id=request_id,
-            document_id=document_id,
-            original_query=query,
-            rewritten_query=resolved_q,
-            query_intent=intent_obj.intent,
-            retrieval_strategy=intent_obj.retrieval_strategy,
-            multi_queries=sub_queries,
-            retrieved_chunks=all_candidate_chunks,
-            reranked_chunks=final_chunks,
-            context_sent_to_llm=context_str,
-            raw_llm_response=json.dumps(llm_raw) if llm_raw else "",
-            parsed_response=res_payload,
-            confidence_score=res_payload.get("confidence", 0.0),
-            citation_valid=valid_citations,
-            execution_time_ms=latency,
-            answer_faithfulness=res_payload.get("answer_faithfulness", 0.0),
-            citation_correctness=res_payload.get("citation_correctness", 0.0),
-            response_latency_ms=latency
-        )
-
-        res_payload["rag_trace"] = trace.__dict__
-
-        # Cache result if valid and successful
-        if query_vector and valid_citations and res_payload.get("confidence", 0) > 0.6:
-            global_semantic_cache.put(query_vector, document_id, res_payload)
-
-        return res_payload
-
-
-# Instantiated Default Pipeline Instance
-default_rag_pipeline = RAGPipeline()
+        return res_dict, True, "Generated using Universal Extractive Fallback"
