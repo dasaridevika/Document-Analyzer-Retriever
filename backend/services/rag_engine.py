@@ -475,6 +475,14 @@ def _extract_json_payload(data: Any) -> Optional[Dict[str, Any]]:
                 res = _extract_json_payload(val)
                 if res:
                     return res
+                clean_val = val.strip()
+                if clean_val and not clean_val.startswith("{"):
+                    return {
+                        "answerable": True,
+                        "answer": clean_val,
+                        "parts": [],
+                        "confidence": 0.85
+                    }
 
     elif isinstance(data, str):
         try:
@@ -507,7 +515,7 @@ def _extract_json_payload(data: Any) -> Optional[Dict[str, Any]]:
 
         # Generative Fallback: If it is conversational prose, wrap it as the answer directly
         clean_text = data.strip()
-        if clean_text and not clean_text.startswith("{") and len(clean_text) > 30:
+        if clean_text and not clean_text.startswith("{") and len(clean_text) > 2:
             return {
                 "answerable": True,
                 "answer": clean_text,
