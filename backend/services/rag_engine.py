@@ -1096,11 +1096,18 @@ class GroundedCitationVerifier:
             raw_text = c.get("raw_content", c["text"])
             clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
 
-            unwrapped = re.sub(r'(?<![.!?:\n])\n(?![A-Z\•\*\-\d\.])', ' ', clean_text)
-            unwrapped = re.sub(r'\s+', ' ', unwrapped)
+            # Split text by newlines (to handle resumes, list items, and headers) and sentence punctuation
+            raw_sentences = []
+            for part in re.split(r'\n+', clean_text):
+                part_clean = part.strip()
+                if not part_clean:
+                    continue
+                for s in re.split(r'(?<=[.!?])\s+', part_clean):
+                    s_clean = s.strip()
+                    if s_clean:
+                        raw_sentences.append(s_clean)
 
-            for s in re.split(r'(?<=[.!?])\s+', unwrapped):
-                s_clean = s.strip()
+            for s_clean in raw_sentences:
                 if s_clean in seen_quotes or not GroundedCitationVerifier._is_clean_sentence(s_clean):
                     continue
 
@@ -1173,6 +1180,13 @@ class GroundedCitationVerifier:
                         if any(k in s_lower for k in ["project", "projects", "developed", "built", "implemented"]):
                             intent_bonus += 0.45
                         if any(k in s_lower for k in ["education", "b.tech", "skills:", "languages :"]):
+                            intent_bonus -= 0.30
+
+                    # Boost location/origin sentences if user queried about location
+                    if any(w in lower_q for w in ["where", "from", "location", "live", "address", "city", "country", "state"]):
+                        if any(k in s_lower for k in ["telangana", "hyderabad", "khammam", "india", "address", "location", "ranchi", "peddapalli", "morthad", "nizamabad"]):
+                            intent_bonus += 0.45
+                        if any(k in s_lower for k in ["skills:", "programming :", "databases :", "projects", "attendance"]):
                             intent_bonus -= 0.30
                 
                 final_score = overlap_score + intent_bonus
