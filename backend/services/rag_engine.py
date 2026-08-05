@@ -205,20 +205,17 @@ class LLMSynthesizer:
 # Adaptive Zero-Boilerplate Prompting
 # ============================================================================
 
-SYSTEM_PROMPT = """You are an expert AI Document Assistant and Domain Specialist. Your primary goal is to address the user's request accurately, adaptively, and intelligently based on the provided Document Context.
+SYSTEM_PROMPT = """You are an expert AI Document Assistant and Career/Domain Analyst. Your goal is to answer the user's query accurately and adaptively based on the provided Document Context.
 
-OPERATIONAL INSTRUCTIONS:
-1. HYBRID REASONING & INTENT UNDERSTANDING:
-   - Always prioritize facts explicitly stated in the Document Context (e.g., location names, education, skills, dates).
-   - If the user asks for deductions, recommendations, role suitability, or synthesis (e.g., "where is he from", "what role suits him", "how can this PRD be improved"), USE YOUR DOMAIN KNOWLEDGE to reason over the provided context.
-   - Do NOT fail or refuse simply because a question requires basic geographical, domain, or career deduction from the text.
+OPERATIONAL RULES:
+1. INTENT & REASONING:
+   - For factual queries, cite details directly from the text.
+   - For analytical, evaluative, or recommendation queries (e.g., "which role suits him", "where is he from", "summarize"), use professional reasoning and domain knowledge to infer the answer from the user's context (skills, projects, education, location text).
+   - NEVER refuse to answer with "I could not find sufficient evidence" simply because the prompt's exact words aren't in the document.
 
-2. ADAPTIVE OUTPUT FORMATTING:
-   - Deliver answers directly in the structure or format the user requests (e.g., Markdown tables, JSON, bullet points, formal analysis, or concise answers).
-   - Omit rigid, hardcoded section titles (like forced "Executive Summary" or "Evidence" blocks) unless explicitly requested.
-
-3. DIRECT DELIVERY:
-   - Start your response immediately with the answer. Omit conversational filler ("Based on the uploaded document...") and polite introductions.
+2. FORMATTING & DELIVERY:
+   - Match any format requested by the user (bullet points, Markdown tables, JSON, clear paragraphs).
+   - Start your response directly with the answer. Omit conversational intro filler ("Based on the uploaded PDF...").
 
 DOCUMENT CONTEXT:
 {context_text}"""
@@ -1630,6 +1627,19 @@ class EnterpriseRAGPipeline:
             chunk_copy["similarity_score"] = round(similarity_score, 4)
             chunk_copy["rrf_score"] = round(rrf_score, 4)
             retrieved_chunks.append(chunk_copy)
+
+        if not retrieved_chunks:
+            fallback_chunks = []
+            for idx in candidate_indices[:top_k]:
+                fallback_chunks.append({
+                    "chunk_id": vector_store.ids_store[idx],
+                    "text": vector_store.documents_store[idx],
+                    "metadata": vector_store.metadata_store[idx],
+                    "similarity_score": 1.0,
+                    "rrf_score": 1.0
+                })
+            fallback_chunks.sort(key=lambda x: x["metadata"].get("page_number", 0))
+            return fallback_chunks
 
         return retrieved_chunks[:top_k]
 
