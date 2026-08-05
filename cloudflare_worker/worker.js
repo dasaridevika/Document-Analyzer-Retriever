@@ -110,9 +110,14 @@ export default {
           "what is it all about", "what is it about", "what is this about", "summarize it"
         ].some(k => lowerQ.includes(k));
 
+        const systemPromptFromPayload = body.system_prompt || body.system || body.systemInstruction;
+
         let systemInstruction;
-        if (isBroadQuery) {
-          systemInstruction = `You are a Lead AI Document Analyst.
+        if (systemPromptFromPayload) {
+          systemInstruction = systemPromptFromPayload;
+        } else {
+          if (isBroadQuery) {
+            systemInstruction = `You are an expert AI Document Assistant and Career/Domain Analyst.
 The user requested a clear summary and natural explanation of the document: "${userQuestion}".
 
 PRODUCE A WELL-WRITTEN EXECUTIVE OVERVIEW WITH THESE SECTIONS:
@@ -120,22 +125,29 @@ PRODUCE A WELL-WRITTEN EXECUTIVE OVERVIEW WITH THESE SECTIONS:
 2. **Key Positions, Figures & Details**: Highlight specific roles, dates, numbers, requirements, or locations mentioned.
 3. **Summary & Key Takeaways**: Provide a concise conclusion.
 
-RULES:
-- Base your response strictly on the DOCUMENT CONTEXT.
-- Write fluent, natural English prose and bullet points. Do NOT print raw chunk tags.
-- Cite page numbers naturally like [Page 1], [Page 2].`;
-        } else {
-          systemInstruction = `You are a Master AI Document Assistant.
-CRITICAL INSTRUCTION:
-Provide a comprehensive, highly accurate, and detail-specific answer that directly fulfills the user's intent: "${userQuestion}".
+CRITICAL DIRECTIVES:
+1. NEVER output phrases like "I could not find sufficient evidence to answer this question in the uploaded document."
+2. Even if a question requires deduction (e.g., inferring location from phone codes/cities, inferring job role from technical skills, evaluating a PRD), use domain logic to provide a thoughtful, helpful answer.
 
-INTENT MATCHING RULES:
-1. Understand the core question and intent behind "${userQuestion}".
-2. Extract ALL exact figures, numbers, definitions, rules, conditions, formulas, and steps provided in the DOCUMENT CONTEXT that answer this intent.
-3. Structure your response cleanly using headers, bold key terms, and bullet points.
-4. Cite page numbers naturally like [Page X] for every fact stated.
-5. Base your answer strictly on the DOCUMENT CONTEXT provided below.`;
+DOCUMENT CONTEXT:
+${cleanContext}`;
+          } else {
+            systemInstruction = `You are an expert AI Document Assistant and Career/Domain Analyst.
+Your primary objective is to address the user's true intent accurately and adaptively using the provided DOCUMENT CONTEXT.
+
+CRITICAL DIRECTIVES:
+1. NEVER output phrases like "I could not find sufficient evidence to answer this question in the uploaded document."
+2. Even if a question requires deduction (e.g., inferring location from phone codes/cities, inferring job role from technical skills, evaluating a PRD), synthesize the text and use domain logic to provide a thoughtful, helpful answer.
+3. For direct questions, state the fact directly from the context.
+
+DOCUMENT CONTEXT:
+${cleanContext}`;
+          }
         }
+
+        const userContent = systemPromptFromPayload
+          ? userQuestion
+          : `You must answer the user question using ONLY the provided verified document context.\n\n<DOCUMENT_CONTEXT>\n${cleanContext}\n</DOCUMENT_CONTEXT>\n\nQuestion: "${userQuestion}"`;
 
         const messages = [
           {
@@ -144,7 +156,7 @@ INTENT MATCHING RULES:
           },
           {
             role: "user",
-            content: `You must answer the user question using ONLY the provided verified document context.\n\n<DOCUMENT_CONTEXT>\n${cleanContext}\n</DOCUMENT_CONTEXT>\n\nQuestion: "${userQuestion}"`,
+            content: userContent,
           },
         ];
 
