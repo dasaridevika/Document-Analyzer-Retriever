@@ -594,7 +594,11 @@ class ConversationResolver:
                     is_complete_question = bool(words & question_words)
                     
                     # Pronoun substitution heuristic
-                    if has_pronouns or (is_tiny_fragment and not is_complete_question):
+                    query_contains_name = any(
+                        w.lower() not in {"what", "how", "why", "who", "where", "define", "explain", "describe", "compare", "versus", "vs", "list", "show", "check", "page", "chapter"}
+                        for w in re.findall(r'\b[A-Z][a-z]+\b', query)
+                    )
+                    if (has_pronouns and not query_contains_name) or (is_tiny_fragment and not is_complete_question):
                         # Extract key subject keywords from previous query
                         stop_words_history = {
                             "what", "is", "how", "does", "do", "are", "there", "in", "for", "to", "a", "an", "and", "or",
