@@ -1041,6 +1041,10 @@ class GroundedCitationVerifier:
         if any(w in lower_q_raw for w in ["experience", "internship", "internships", "work", "intern", "history", "job", "role", "roles", "suit", "career"]):
             expanded_match_words.update(["internship", "intern", "experience", "nielit", "innovate", "apcsip", "sure", "trust", "work", "role", "roles", "cyber", "security", "cloud", "computing"])
 
+        # Document / Candidate general reference mapping
+        if any(w in lower_q_raw for w in ["candidate", "resume", "pdf", "document", "cv", "person", "profile", "path", "he", "she", "his", "her", "him", "them", "their", "individual", "applicant", "engineer", "analyst", "who is", "about"]):
+            expanded_match_words.update(["summary", "professional", "education", "experience", "skills", "projects", "internship", "innovate", "cyber", "security", "ml", "ai", "b.tech", "jntu", "excel", "power bi", "python", "telangana", "hyderabad", "khammam"])
+
         extracted_items = []
         seen_quotes: Set[str] = set()
 
