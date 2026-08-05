@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+from pydantic import BaseModel, Field
 
 from backend.config import DATA_DIR
 
@@ -36,6 +37,22 @@ from backend.config import (
 from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Pydantic Structured Output Models
+# ============================================================================
+
+class CitationItem(BaseModel):
+    chunk_id: str = Field(description="The unique chunk identifier supporting the claim.")
+    page_number: int = Field(description="The page number where the verbatim quote is found.")
+    verbatim_quote: str = Field(description="The exact text quote from the document chunk.")
+
+class LLMSynthesisResponse(BaseModel):
+    overview: str = Field(description="A high-level overview of the answer.")
+    detailed_explanation: str = Field(description="Detailed explanation with structured formatting.")
+    citations: List[CitationItem] = Field(description="List of citations verifying the statements.")
+    confidence_score: float = Field(description="A confidence score between 0.0 and 1.0.")
 
 
 # ============================================================================
@@ -117,6 +134,71 @@ class RAGTrace:
     answer_faithfulness: float = 0.0
     citation_correctness: float = 0.0
     response_latency_ms: float = 0.0
+
+
+# ============================================================================
+# Intent-Aware LLM Synthesis Helper
+# ============================================================================
+
+class LLMSynthesizer:
+    """Helper class that dynamically alters system prompts based on query intent."""
+
+    @staticmethod
+    def get_system_prompt(intent: str) -> str:
+        prompt_intent = intent
+        if intent in ["qa", "extract_fields", "fact", "factual"]:
+            prompt_intent = "factual"
+        elif intent in ["compare", "comparative"]:
+            prompt_intent = "comparative"
+        elif intent in ["code", "technical", "code_technical"]:
+            prompt_intent = "code_technical"
+        elif intent == "summary":
+            prompt_intent = "summary"
+
+        base_prompt = (
+            "You are a helpful, expert AI Assistant. Use the provided document context to formulate a response. "
+            "You must synthesize your answer based strictly on the provided context."
+        )
+        if prompt_intent == "summary":
+            return (
+                f"{base_prompt}\n"
+                "Provide a high-level executive summary of the document, followed by key bullet points detailing "
+                "the most important takeaways."
+            )
+        elif prompt_intent == "code_technical":
+            return (
+                f"{base_prompt}\n"
+                "Focus on technical implementation details, precise configuration parameters, and provide relevant "
+                "code snippets or commands where applicable."
+            )
+        elif prompt_intent == "comparative":
+            return (
+                f"{base_prompt}\n"
+                "Present the comparison in a structured format, using markdown tables or clear categorizations to "
+                "contrast differences and highlight similarities."
+            )
+        elif prompt_intent == "factual":
+            return (
+                f"{base_prompt}\n"
+                "Provide a direct, concise, and factual answer grounded exactly in the provided context. Avoid speculation."
+            )
+        else:
+            return f"{base_prompt}\nProvide a clear, detailed explanation based on the context."
+
+    @staticmethod
+    def format_context_block(chunks: List[Dict[str, Any]]) -> str:
+        context_blocks = []
+        for c in chunks:
+            chunk_id = c.get("chunk_id", "Unknown ID")
+            page_num = c.get("metadata", {}).get("page_number") or c.get("page_number") or "?"
+            text = c.get("raw_content") or c.get("text") or ""
+            
+            context_blocks.append(
+                f"CHUNK ID: {chunk_id}\n"
+                f"PAGE NUMBER: {page_num}\n"
+                f"Content:\n{text}"
+            )
+        return "\n\n---\n\n".join(context_blocks)
 
 
 # ============================================================================
@@ -311,10 +393,43 @@ global_semantic_cache = SemanticCache()
 # Helper Functions & Parsers
 # ============================================================================
 
+def reciprocal_rank_fusion(dense_ranks: List[Any], sparse_ranks: List[Any], k: int = 60) -> List[Tuple[Any, float]]:
+    """
+    Reciprocal Rank Fusion (RRF) to merge vector search and BM25/keyword ranks into unified candidate lists.
+    Accepts lists of strings (chunk IDs) or dicts. Returns sorted list of (item, rrf_score) descending.
+    """
+    rrf_scores = {}
+    item_map = {}
+
+    def get_key_and_item(item):
+        if isinstance(item, str):
+            return item, item
+        elif isinstance(item, dict):
+            key = item.get("chunk_id") or item.get("id")
+            return key, item
+        return str(item), item
+
+    for rank, item in enumerate(dense_ranks):
+        key, orig = get_key_and_item(item)
+        if key:
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank)
+            item_map[key] = orig
+
+    for rank, item in enumerate(sparse_ranks):
+        key, orig = get_key_and_item(item)
+        if key:
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank)
+            if key not in item_map:
+                item_map[key] = orig
+
+    sorted_keys = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    return [(item_map[key], score) for key, score in sorted_keys]
+
+
 def _extract_json_payload(data: Any) -> Optional[Dict[str, Any]]:
     """Extracts JSON payload from dictionary or raw string."""
     if isinstance(data, dict):
-        if "answerable" in data and ("answer" in data or "definition" in data or "parts" in data):
+        if ("answerable" in data and ("answer" in data or "definition" in data or "parts" in data)) or ("citations" in data and "overview" in data):
             return data
         for k in ["response", "answer", "result", "output"]:
             val = data.get(k)
@@ -419,36 +534,47 @@ class ConversationResolver:
             p_num = page_followup.group(1)
             return f"What is discussed on page {p_num}?"
 
-        # History Fusion
-        if chat_history and len(re.findall(r'\w+', query)) <= 5:
+        # History Fusion and Anaphora Resolution
+        if chat_history:
             user_msgs = [m["content"] for m in chat_history if m.get("role") == "user" and m.get("content", "").strip()]
             if user_msgs:
                 prev_q = user_msgs[-1].strip()
                 prev_q_lower = prev_q.lower()
-                # Do not fuse if previous query was a summary/overview query
                 is_prev_summary = any(x in prev_q_lower for x in ["summarise", "summarize", "summary", "overview", "pdf about"])
+                
                 if not is_prev_summary:
                     pronouns = {"he", "she", "it", "they", "him", "her", "them", "his", "their", "its", "this", "that", "these", "those", "himself", "herself", "itself"}
                     words = set(re.findall(r'\w+', lower_q))
                     has_pronouns = bool(words & pronouns)
-                    is_tiny_fragment = len(re.findall(r'\w+', query)) <= 2
+                    is_tiny_fragment = len(re.findall(r'\w+', query)) <= 3
                     
                     question_words = {"what", "how", "why", "who", "where", "define", "explain", "describe", "compare", "versus", "vs", "list"}
                     is_complete_question = bool(words & question_words)
                     
-                    should_fuse = False
-                    if has_pronouns:
-                        should_fuse = True
-                    elif is_tiny_fragment and not is_complete_question:
-                        should_fuse = True
+                    # Pronoun substitution heuristic
+                    if has_pronouns or (is_tiny_fragment and not is_complete_question):
+                        # Extract key subject keywords from previous query
+                        stop_words_history = {
+                            "what", "is", "how", "does", "do", "are", "there", "in", "for", "to", "a", "an", "and", "or",
+                            "explain", "describe", "define", "show", "me", "the", "tell", "about", "list", "out", "of"
+                        }
+                        prev_words = [w for w in re.findall(r'\w+', prev_q_lower) if w not in stop_words_history]
+                        last_subject = " ".join(prev_words) if prev_words else ""
                         
-                    is_subject_change = ("hvdc" in prev_q_lower and "shunt" in lower_q) or ("shunt" in prev_q_lower and "hvdc" in lower_q)
-                    
-                    if should_fuse and not is_subject_change:
-                        if prev_q and prev_q_lower != lower_q:
+                        if last_subject:
+                            # Replace pronouns in query with last_subject
+                            modified_query = query
+                            for p in pronouns:
+                                modified_query = re.sub(rf'\b{p}\b', last_subject, modified_query, flags=re.IGNORECASE)
+                            return modified_query
+                        
+                        # Fallback fusion if subject replacement not possible
+                        is_subject_change = ("hvdc" in prev_q_lower and "shunt" in lower_q) or ("shunt" in prev_q_lower and "hvdc" in lower_q)
+                        if not is_subject_change and prev_q_lower != lower_q:
                             return f"{prev_q} - {query}"
 
         return clean_q
+
 
 
 class QueryRewriter:
@@ -532,6 +658,13 @@ class QueryRewriter:
             broad_coverage = True
             targets = ["rewritten text", "simplified content", "rephrasing"]
 
+        elif any(w in lower_q for w in ["code", "technical", "snippet", "parameter", "function", "class", "variable", "syntax", "implementation"]):
+            intent = "code_technical"
+            reason = "User requested technical details, code snippets, or configuration parameters."
+            retrieval_mode = "hybrid"
+            response_format = "prose"
+            targets = ["code snippets", "configuration parameters", "implementation details"]
+
         elif len(lower_q.split()) <= 1 or lower_q in ["test", "hello", "hi", "help"]:
             intent = "unknown"
             reason = "The query has unclear or unsupported intent characteristics."
@@ -580,6 +713,8 @@ class QueryRewriter:
             rewritten_query = f"Extraction of action items, deadlines, deliverables, obligations, and tasks in {lower_q}"
         elif intent == "rewrite":
             rewritten_query = f"Rephrased, simplified, and cleaned version of {lower_q}"
+        elif intent == "code_technical":
+            rewritten_query = f"Technical implementation details, parameters, and code snippets for {lower_q}"
 
         confidence = 0.0 if clarification_needed else 0.95
 
@@ -644,7 +779,7 @@ class GroundedCitationVerifier:
     @staticmethod
     def verify_response(
         query: str,
-        structured_json: Optional[Dict[str, Any]],
+        structured_json: Optional[Any],
         target_chunks: List[Dict[str, Any]],
         intent_obj: QueryIntent
     ) -> Tuple[Dict[str, Any], bool, str]:
@@ -655,15 +790,55 @@ class GroundedCitationVerifier:
                 "confidence": 0.0
             }, False, "No target chunks retrieved"
 
-        if not structured_json or not structured_json.get("answerable", True):
+        # Adapt Pydantic models (like LLMSynthesisResponse) or LLMSynthesisResponse-like dicts
+        if structured_json:
+            if hasattr(structured_json, "dict") or hasattr(structured_json, "model_dump"):
+                model_dict = structured_json.model_dump() if hasattr(structured_json, "model_dump") else structured_json.dict()
+                evidence_list = []
+                for cite in model_dict.get("citations", []):
+                    evidence_list.append({
+                        "chunk_id": cite.get("chunk_id"),
+                        "page": cite.get("page_number"),
+                        "quote": cite.get("verbatim_quote")
+                    })
+                structured_json = {
+                    "answerable": True,
+                    "answer": f"{model_dict.get('overview', '')}\n\n{model_dict.get('detailed_explanation', '')}".strip(),
+                    "evidence": evidence_list,
+                    "confidence": model_dict.get("confidence_score", 0.9)
+                }
+            elif isinstance(structured_json, dict) and "citations" in structured_json and "overview" in structured_json:
+                evidence_list = []
+                for cite in structured_json.get("citations", []):
+                    if isinstance(cite, dict):
+                        cid = cite.get("chunk_id")
+                        page = cite.get("page_number")
+                        quote = cite.get("verbatim_quote")
+                    else:
+                        cid = getattr(cite, "chunk_id", None)
+                        page = getattr(cite, "page_number", None)
+                        quote = getattr(cite, "verbatim_quote", None)
+                    evidence_list.append({
+                        "chunk_id": cid,
+                        "page": page,
+                        "quote": quote
+                    })
+                structured_json = {
+                    "answerable": True,
+                    "answer": f"{structured_json.get('overview', '')}\n\n{structured_json.get('detailed_explanation', '')}".strip(),
+                    "evidence": evidence_list,
+                    "confidence": structured_json.get("confidence_score", 0.9)
+                }
+
+        if not structured_json or not isinstance(structured_json, dict) or not structured_json.get("answerable", True):
             res_dict, valid, msg = GroundedCitationVerifier._fallback_universal_extractive(query, target_chunks, intent_obj)
             res_dict["answer_faithfulness"] = 1.0
             res_dict["citation_correctness"] = 1.0
             return res_dict, valid, msg
 
-        raw_definition = structured_json.get("definition", "").strip()
-        raw_explanation = structured_json.get("explanation", "").strip()
-        raw_answer = structured_json.get("answer", "").strip()
+        raw_definition = (structured_json.get("definition") or "").strip()
+        raw_explanation = (structured_json.get("explanation") or "").strip()
+        raw_answer = (structured_json.get("answer") or "").strip()
 
         evidence_list = structured_json.get("evidence", structured_json.get("claims", []))
         confidence = float(structured_json.get("confidence", 0.90))
@@ -927,9 +1102,9 @@ class GroundedCitationVerifier:
 # Main RAGEngine Pipeline Class
 # ============================================================================
 
-class RAGEngine:
+class EnterpriseRAGPipeline:
     """
-    Universal Production Enterprise RAG Engine with Map-Reduce Summarization & Document APIs.
+    Universal Production Enterprise RAG Pipeline with Generative, Intent-Aware AI Assistant capabilities.
     """
 
     def __init__(self, embedding_service, vector_store):
@@ -950,7 +1125,89 @@ class RAGEngine:
         all_chunks = self.vector_store.get_first_pages_chunks(filename=filename, document_id=document_id, max_pages=100)
         return [c for c in all_chunks if c.get("metadata", {}).get("page_number") == page_number]
 
-    def answer_query(
+    def _execute_structured_llm_call(
+        self, llm_client: Any, system_prompt: str, user_prompt: str, temperature: float
+    ) -> Optional[LLMSynthesisResponse]:
+        # 1. Try OpenAI style beta.chat.completions.parse
+        if hasattr(llm_client, "beta") and hasattr(llm_client.beta, "chat"):
+            try:
+                completion = llm_client.beta.chat.completions.parse(
+                    model=getattr(self, "llm_model", "gpt-4o-mini"),
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    response_format=LLMSynthesisResponse,
+                    temperature=temperature
+                )
+                return completion.choices[0].message.parsed
+            except Exception as e:
+                logger.warning(f"Structured OpenAI parse failed: {e}. Trying generic methods.")
+
+        # 2. Try standard chat.completions.create with JSON response format
+        if hasattr(llm_client, "chat") and hasattr(llm_client.chat, "completions"):
+            try:
+                completion = llm_client.chat.completions.create(
+                    model=getattr(self, "llm_model", "gpt-4o-mini"),
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=temperature
+                )
+                content = completion.choices[0].message.content
+                data = json.loads(content)
+                return LLMSynthesisResponse(**data)
+            except Exception as e:
+                logger.warning(f"Standard OpenAI chat completion failed: {e}")
+
+        # 3. Try if llm_client is a callable
+        if callable(llm_client):
+            try:
+                try:
+                    response_text = llm_client(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ]
+                    )
+                except Exception:
+                    response_text = llm_client(f"{system_prompt}\n\n{user_prompt}")
+
+                if isinstance(response_text, str):
+                    match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                    if match:
+                        data = json.loads(match.group(0))
+                        return LLMSynthesisResponse(**data)
+                elif isinstance(response_text, dict):
+                    return LLMSynthesisResponse(**response_text)
+            except Exception as e:
+                logger.warning(f"Callable llm_client execution failed: {e}")
+
+        # 4. Try direct generate/predict/complete methods
+        for m_name in ["chat", "generate", "complete", "predict"]:
+            if hasattr(llm_client, m_name) and callable(getattr(llm_client, m_name)):
+                try:
+                    method = getattr(llm_client, m_name)
+                    response = method(f"{system_prompt}\n\n{user_prompt}")
+                    if hasattr(response, "text"):
+                        text = response.text
+                    elif hasattr(response, "content"):
+                        text = response.content
+                    else:
+                        text = str(response)
+
+                    match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if match:
+                        data = json.loads(match.group(0))
+                        return LLMSynthesisResponse(**data)
+                except Exception as e:
+                    logger.warning(f"llm_client.{m_name} execution failed: {e}")
+
+        return None
+
+    def process_query(
         self,
         query: str,
         filename: Optional[str] = None,
@@ -960,10 +1217,11 @@ class RAGEngine:
         system_prompt: Optional[str] = None,
         top_k: int = 12,
         temperature: float = 0.0,
-        chat_history: Optional[List[Dict[str, Any]]] = None
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+        llm_client: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
-        Public API Endpoint preserved for backend and frontend calls.
+        Processes a query in an intent-aware generative manner, with fallback support.
         """
         start_time = time.time()
         req_id = f"req_{uuid.uuid4().hex[:10]}"
@@ -974,7 +1232,7 @@ class RAGEngine:
             document_id=document_id or "auto",
             original_query=clean_query,
             rewritten_query=clean_query,
-            query_intent="fact",
+            query_intent="factual",
             retrieval_strategy="dense_hybrid"
         )
 
@@ -996,6 +1254,18 @@ class RAGEngine:
         trace.query_intent = intent_obj.intent
         trace.retrieval_strategy = intent_obj.retrieval_strategy
 
+        # Immediate clarification return if query is ambiguous
+        if intent_obj.clarification_needed:
+            trace.failure_stage = "clarification"
+            trace.failure_reason = "Query is ambiguous; clarification requested."
+            return {
+                "answer": f"## Clarification Needed\n\n{intent_obj.clarification_question}",
+                "sources": [],
+                "system_prompt_used": IMMUTABLE_SYSTEM_PROMPT,
+                "retrieved_count": 0,
+                "rag_trace": self._trace_to_dict(trace)
+            }
+
         # Stage 4: Multi-Query Semantic Expansion
         multi_queries = QueryRewriter.generate_multi_queries(resolved_q, intent_obj)
         trace.multi_queries = multi_queries
@@ -1013,23 +1283,17 @@ class RAGEngine:
         all_candidate_chunks: List[Dict[str, Any]] = []
 
         if intent_obj.retrieval_strategy == "map_reduce":
-            # Document Summarization Pipeline: Retrieve Full Document
             all_candidate_chunks = self.retrieve_document(filename=filename, document_id=document_id, max_pages=15)
-
         elif intent_obj.retrieval_strategy == "page_filter" and intent_obj.target_page:
             all_candidate_chunks = self.retrieve_page(page_number=intent_obj.target_page, filename=filename, document_id=document_id)
-
         elif intent_obj.retrieval_strategy == "multi_hop":
-            # Multi-Hop Retrieval: Topic 1 + Topic 2
             with ThreadPoolExecutor(max_workers=2) as executor:
                 f1 = executor.submit(self._retrieve_chunks_for_query, intent_obj.primary_subject, intent_obj.intent, top_k, filename, document_id, session_id, user_id)
                 f2 = executor.submit(self._retrieve_chunks_for_query, intent_obj.secondary_subject or resolved_q, intent_obj.intent, top_k, filename, document_id, session_id, user_id)
                 c1 = f1.result()
                 c2 = f2.result()
                 all_candidate_chunks = c1 + c2
-
         else:
-            # Parallel Multi-Query Hybrid Retrieval
             seen_chunk_ids: Set[str] = set()
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = [
@@ -1078,54 +1342,90 @@ class RAGEngine:
                 "rag_trace": self._trace_to_dict(trace)
             }
 
-        # Stage 10: Building Context
-        context_blocks = []
-        for c in final_chunks:
-            page_num = c["metadata"].get("page_number", "?")
-            doc_fname = c["metadata"].get("filename", "Document")
-            cid = c["chunk_id"]
-            
-            parent_text = c["metadata"].get("parent_text")
-            if parent_text:
-                parent_cid = c["metadata"].get("parent_chunk_id") or cid
-                clean_chunk_text = (
-                    f"Document: {doc_fname}\n"
-                    f"Document ID: {c['metadata'].get('document_id', '')}\n"
-                    f"Page: {page_num}\n"
-                    f"Section: {c['metadata'].get('section_title', 'General Section')}\n"
-                    f"Chunk ID: {parent_cid}\n\n"
-                    f"Content:\n{parent_text}"
-                )
-            else:
-                clean_chunk_text = c["text"]
-                
-            context_blocks.append(f"--- [Page {page_num} | Chunk {cid} | Document: {doc_fname}] ---\n{clean_chunk_text}")
-
-        combined_context = "<DOCUMENT_CONTEXT>\n" + "\n\n".join(context_blocks) + "\n</DOCUMENT_CONTEXT>"
+        # Stage 10: Building Context Block using LLMSynthesizer
+        combined_context = LLMSynthesizer.format_context_block(final_chunks)
+        trace.compressed_context = combined_context
         trace.context_sent_to_llm = combined_context
 
+        # Determine dynamic system prompt based on intent
+        intent_system_prompt = LLMSynthesizer.get_system_prompt(intent_obj.intent)
+        if system_prompt:
+            sanitized_style = re.sub(
+                r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)',
+                '', system_prompt, flags=re.IGNORECASE
+            ).strip()
+            if sanitized_style:
+                intent_system_prompt = f"{intent_system_prompt}\n\nUSER STYLE PROMPT: {sanitized_style}"
+
+        user_prompt = (
+            f"You must answer the user question using ONLY the provided verified document context.\n\n"
+            f"<DOCUMENT_CONTEXT>\n{combined_context}\n</DOCUMENT_CONTEXT>\n\n"
+            f"Question: {resolved_q}"
+        )
+
         # Stage 11 & 12: LLM Execution
-        raw_llm, structured_json = self._execute_llm_call(
-            context=combined_context,
-            query=resolved_q,
-            system_prompt=system_prompt,
-            temperature=temperature
-        )
+        raw_llm = ""
+        structured_json = None
+        succeeded = False
 
-        trace.raw_llm_response = raw_llm or ""
-        trace.parsed_response = structured_json or {}
+        if llm_client:
+            try:
+                # 1. Execute using provided structured generation client
+                structured_response = self._execute_structured_llm_call(
+                    llm_client=llm_client,
+                    system_prompt=intent_system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature
+                )
+                if structured_response:
+                    structured_json = structured_response
+                    raw_llm = str(structured_response)
+                    succeeded = True
+            except Exception as e:
+                logger.warning(f"Structured llm_client execution failed: {e}. Falling back to default generation.")
 
-        # Stage 13 & 14: Citation Verification & Grounding
-        verified_res, is_valid_citations, v_reason = GroundedCitationVerifier.verify_response(
-            query=clean_query,
-            structured_json=structured_json,
-            target_chunks=final_chunks,
-            intent_obj=intent_obj
-        )
+        if not succeeded:
+            # Fall back to self._execute_llm_call (Cloudflare Workers / REST API)
+            try:
+                raw_llm, structured_json = self._execute_llm_call(
+                    context=combined_context,
+                    query=resolved_q,
+                    system_prompt=system_prompt,
+                    temperature=temperature
+                )
+                if raw_llm and structured_json:
+                    succeeded = True
+            except Exception as e:
+                logger.warning(f"Default self._execute_llm_call failed: {e}")
+
+        # If LLM execution succeeded (either via structured client or default call)
+        if succeeded and structured_json:
+            trace.raw_llm_response = raw_llm or ""
+            trace.parsed_response = (
+                structured_json if isinstance(structured_json, dict)
+                else (structured_json.model_dump() if hasattr(structured_json, "model_dump") else structured_json.__dict__)
+            )
+
+            # Stage 13 & 14: Citation Verification & Grounding
+            verified_res, is_valid_citations, v_reason = GroundedCitationVerifier.verify_response(
+                query=clean_query,
+                structured_json=structured_json,
+                target_chunks=final_chunks,
+                intent_obj=intent_obj
+            )
+        else:
+            # Stage 13 & 14 Fallback: If no LLM client was available or LLM generation failed, fall back to extractive
+            logger.info("Structured LLM generation unavailable or failed. Falling back smoothly to extractive method.")
+            verified_res, is_valid_citations, v_reason = GroundedCitationVerifier._fallback_universal_extractive(
+                query=clean_query,
+                target_chunks=final_chunks,
+                intent_obj=intent_obj
+            )
+            is_valid_citations = True
 
         trace.citation_valid = is_valid_citations
         trace.answer_relevance = 0.95 if is_valid_citations else 0.50
-        trace.groundedness = 0.95 if structured_json and structured_json.get("answerable") else 0.0
+        trace.groundedness = 0.95 if succeeded else 0.0
 
         if not is_valid_citations:
             trace.failure_stage = "citation_validation"
@@ -1135,15 +1435,15 @@ class RAGEngine:
         confidence = self._compute_dynamic_confidence(
             retrieval_count=len(final_chunks),
             citation_valid=is_valid_citations,
-            answerable=bool(structured_json and structured_json.get("answerable"))
+            answerable=succeeded
         )
         trace.confidence_score = confidence
         trace.execution_time_ms = round((time.time() - start_time) * 1000, 2)
-        
+
         # Calculate RAG evaluation metrics
         trace.context_recall = self._compute_context_recall(resolved_q, final_chunks)
-        trace.answer_faithfulness = verified_res.get("answer_faithfulness", 0.0)
-        trace.citation_correctness = verified_res.get("citation_correctness", 0.0)
+        trace.answer_faithfulness = verified_res.get("answer_faithfulness", 1.0 if not succeeded else 0.0)
+        trace.citation_correctness = verified_res.get("citation_correctness", 1.0 if not succeeded else 0.0)
         trace.response_latency_ms = trace.execution_time_ms
 
         sources = [
@@ -1174,26 +1474,115 @@ class RAGEngine:
 
         return final_response
 
+    def answer_query(
+        self,
+        query: str,
+        filename: Optional[str] = None,
+        document_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        top_k: int = 12,
+        temperature: float = 0.0,
+        chat_history: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """Wrapper method for backwards compatibility, routing to process_query."""
+        return self.process_query(
+            query=query,
+            filename=filename,
+            document_id=document_id,
+            session_id=session_id,
+            user_id=user_id,
+            system_prompt=system_prompt,
+            top_k=top_k,
+            temperature=temperature,
+            chat_history=chat_history
+        )
+
+
+
     def _retrieve_chunks_for_query(
         self, sub_q: str, intent_type: str, top_k: int,
         filename: Optional[str], document_id: Optional[str], session_id: Optional[str], user_id: Optional[str]
     ) -> List[Dict[str, Any]]:
-        """Helper to run hybrid vector similarity search."""
+        """Retrieves and merges dense & sparse ranks using reciprocal_rank_fusion."""
         q_embeddings = self.embedding_service.generate_embeddings([sub_q])
         if not q_embeddings:
             return []
+        query_embedding = q_embeddings[0]
 
-        return self.vector_store.similarity_search(
-            query_embedding=q_embeddings[0],
-            raw_query=sub_q,
-            intent_type=intent_type,
-            top_k=top_k,
-            filename_filter=filename,
-            document_id_filter=document_id,
-            session_id_filter=session_id,
-            user_id_filter=user_id,
-            min_score=0.15
-        )
+        vector_store = self.vector_store
+        if not vector_store.ids_store or vector_store.vector_matrix is None:
+            return []
+
+        # Candidate filtering
+        candidates = set(range(len(vector_store.ids_store)))
+        if document_id:
+            candidates &= set(vector_store._doc_id_to_indices.get(document_id, []))
+        if filename:
+            candidates &= set(vector_store._filename_to_indices.get(filename, []))
+        if session_id:
+            candidates &= set(vector_store._session_id_to_indices.get(session_id, []))
+        if user_id:
+            candidates &= set(vector_store._user_id_to_indices.get(user_id, []))
+
+        candidate_indices = sorted(list(candidates))
+        if not candidate_indices:
+            return []
+
+        # 1. Dense Cosine Similarity Ranks
+        sub_matrix = vector_store.vector_matrix[candidate_indices]
+        norm_query = vector_store._normalize_vectors([query_embedding])
+        dense_sims = np.dot(sub_matrix, norm_query.T).flatten()
+
+        dense_list = []
+        for i, idx in enumerate(candidate_indices):
+            dense_list.append({
+                "chunk_id": vector_store.ids_store[idx],
+                "text": vector_store.documents_store[idx],
+                "metadata": vector_store.metadata_store[idx],
+                "similarity_score": float(dense_sims[i])
+            })
+        # Sort to get dense rank list
+        dense_list.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+        # 2. Lexical BM25 Ranks
+        candidate_ids = [vector_store.ids_store[idx] for idx in candidate_indices]
+        bm25_scores = vector_store.bm25_index.score_candidates(sub_q, candidate_ids)
+
+        sparse_list = []
+        for idx in candidate_indices:
+            cid = vector_store.ids_store[idx]
+            sparse_list.append({
+                "chunk_id": cid,
+                "text": vector_store.documents_store[idx],
+                "metadata": vector_store.metadata_store[idx],
+                "bm25_score": float(bm25_scores.get(cid, 0.0))
+            })
+        # Sort to get sparse rank list
+        sparse_list.sort(key=lambda x: x["bm25_score"], reverse=True)
+
+        # 3. Apply Reciprocal Rank Fusion
+        fused = reciprocal_rank_fusion(dense_list, sparse_list, k=60)
+
+        # Map back to standard dict representation for remaining stages
+        retrieved_chunks = []
+        for chunk, rrf_score in fused:
+            similarity_score = 0.5
+            for d in dense_list:
+                if d["chunk_id"] == chunk["chunk_id"]:
+                    similarity_score = d["similarity_score"]
+                    break
+
+            if similarity_score < 0.15 and len(retrieved_chunks) >= 3:
+                continue
+
+            chunk_copy = dict(chunk)
+            chunk_copy["similarity_score"] = round(similarity_score, 4)
+            chunk_copy["rrf_score"] = round(rrf_score, 4)
+            retrieved_chunks.append(chunk_copy)
+
+        return retrieved_chunks[:top_k]
 
     @staticmethod
     def _compute_context_recall(query: str, retrieved_chunks: List[Dict[str, Any]]) -> float:
@@ -1321,3 +1710,9 @@ class RAGEngine:
             "citation_correctness": trace.citation_correctness,
             "response_latency_ms": trace.response_latency_ms
         }
+
+
+class RAGEngine(EnterpriseRAGPipeline):
+    """Backwards compatible wrapper for EnterpriseRAGPipeline."""
+    pass
+
