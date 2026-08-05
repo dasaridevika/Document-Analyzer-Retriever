@@ -1071,6 +1071,10 @@ class GroundedCitationVerifier:
         if any(w in lower_q_raw for w in ["agreement", "contract", "clause", "liability", "termination", "payment", "obligation", "obligations"]):
             expanded_match_words.update(["agreement", "contract", "clause", "clauses", "liability", "termination", "payment", "obligations"])
 
+        # Overview / Topics / Concepts mapping
+        if any(w in lower_q_raw for w in ["topic", "topics", "concept", "concepts", "cover", "covers", "contain", "contains", "subject", "subjects", "content", "contents", "about", "index", "chapter", "chapters"]):
+            expanded_match_words.update(["summary", "overview", "introduction", "preface", "abstract", "index", "content", "contents", "topics", "concepts", "chapters", "variables", "lists", "functions", "classes", "loops"])
+
         extracted_items = []
         seen_quotes: Set[str] = set()
 
@@ -1708,7 +1712,8 @@ class EnterpriseRAGPipeline:
         abstract_triggers = [
             "role", "suit", "summarize", "summary", "overview", "who is",
             "evaluate", "strength", "weakness", "improve", "analyse", "analyze",
-            "opinion", "suggestion", "recommend", "fit", "rate", "review", "where is"
+            "opinion", "suggestion", "recommend", "fit", "rate", "review", "where is",
+            "topic", "topics", "concept", "concepts", "cover", "covers", "content", "contents"
         ]
         is_broad = any(trigger in sub_q.lower() for trigger in abstract_triggers) or len(sub_q.split()) <= 3
 
@@ -1749,6 +1754,8 @@ class EnterpriseRAGPipeline:
                 expansion_terms = "conclusions, limitations, future work, discussion, recommendations, summary"
             elif any(w in lower_sub_q for w in ["agreement", "contract", "clause", "liability", "termination", "payment", "obligation", "obligations"]):
                 expansion_terms = "agreement terms, contract clause, liability, termination, payment obligations"
+            elif any(w in lower_sub_q for w in ["topic", "topics", "concept", "concepts", "cover", "covers", "contain", "contains", "subject", "subjects", "content", "contents", "about", "index", "chapter", "chapters"]):
+                expansion_terms = "document summary, overview, table of contents, main topics, introduction, abstract, index"
 
             if expansion_terms:
                 search_query = f"{sub_q} {expansion_terms}"
