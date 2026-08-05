@@ -739,17 +739,17 @@ class QueryRewriter:
         clarification_needed = False
         clarification_question = ""
 
-        if "list it" in lower_q or (re.search(r'\blist\b', lower_q) and not any(x in lower_q for x in ["points", "items", "terms", "clauses", "dates", "names", "numbers", "obligations", "requirements", "details", "everything", "facts"])):
+        if "list it" in lower_q or (re.search(r'\blist\b', lower_q) and not any(x in lower_q for x in ["points", "items", "terms", "clauses", "dates", "names", "numbers", "obligations", "requirements", "details", "everything", "facts", "skills", "projects", "experience", "education", "certifications", "tools", "technologies", "languages", "jobs", "roles", "hobbies", "activities", "contacts", "history"])):
             ambiguity = True
             clarification_needed = True
             clarification_question = "What specifically would you like me to list from the document?"
 
-        elif "compare" in lower_q and not any(x in lower_q for x in ["sections", "terms", "concepts", "clauses", "versions", "and", "vs", "versus"]):
+        elif "compare" in lower_q and not any(x in lower_q for x in ["sections", "terms", "concepts", "clauses", "versions", "and", "vs", "versus", "skills", "projects", "experience", "education", "candidates", "resumes", "documents", "applicants"]):
             ambiguity = True
             clarification_needed = True
             clarification_question = "What specific sections, terms, or versions would you like me to compare?"
 
-        elif "extract" in lower_q and not any(x in lower_q for x in ["names", "dates", "invoices", "totals", "clauses", "risks", "items", "fields"]):
+        elif "extract" in lower_q and not any(x in lower_q for x in ["names", "dates", "invoices", "totals", "clauses", "risks", "items", "fields", "skills", "projects", "experience", "education", "details", "entities", "text", "information"]):
             ambiguity = True
             clarification_needed = True
             clarification_question = "Which specific fields (e.g., names, dates, amounts) would you like me to extract?"
