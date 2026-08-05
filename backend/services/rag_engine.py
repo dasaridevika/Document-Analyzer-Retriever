@@ -202,6 +202,34 @@ class LLMSynthesizer:
 
 
 # ============================================================================
+# Adaptive Zero-Boilerplate Prompting
+# ============================================================================
+
+SYSTEM_PROMPT = """You are an expert AI Document Assistant. Your objective is to answer the user's query with maximum precision, intelligence, and adaptability, strictly using the provided Context.
+
+OPERATIONAL INSTRUCTIONS:
+1. ADAPTIVE FORMATTING: Directly follow whatever format, tone, style, or structure the user requests (e.g., Markdown tables, JSON, bullet points, executive summaries, step-by-step guides, code, or formal essays). Never wrap your answer in rigid, repeating templates or forced section headers unless requested.
+2. CONTEXT ACCURACY: Base your response exclusively on the facts, data, and details present in the Context. Synthesize information across multiple context chunks when answering broad or high-level queries (e.g., summaries, key takeaways, cross-page analysis).
+3. ZERO HALLUCINATION & MISSING DATA: If the provided Context does not contain enough information to answer the question, state clearly and concisely what specific information is missing from the document. Never invent or infer unstated facts.
+4. DIRECT DELIVERY: Begin your response immediately with the requested content. Omit conversational filler, polite intros ("Sure, here is your answer"), fluff, and repetitive meta-commentary.
+
+CONTEXT:
+{context_text}"""
+
+def build_llm_messages(query: str, retrieved_chunks: list) -> list:
+    # Compile chunks cleanly with page references
+    context_text = "\n\n".join([
+        f"[Source Chunk - Page {c.get('metadata', {}).get('page_number') or c.get('page_number', 'N/A')}]: {c.get('text', '')}"
+        for c in retrieved_chunks
+    ])
+    
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT.format(context_text=context_text)},
+        {"role": "user", "content": query}
+    ]
+
+
+# ============================================================================
 # Semantic Cache & Cross Encoder Reranker Interfaces
 # ============================================================================
 
@@ -1608,10 +1636,11 @@ class EnterpriseRAGPipeline:
     def _execute_llm_call(
         self, context: str, query: str, system_prompt: Optional[str], temperature: float = 0.0
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-        sanitized_style = ""
+        combined_system = SYSTEM_PROMPT.format(context_text=context)
         if system_prompt:
             sanitized_style = re.sub(r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)', '', system_prompt, flags=re.IGNORECASE).strip()
-        combined_system = f"{IMMUTABLE_SYSTEM_PROMPT}\n\nUSER STYLE PROMPT: {sanitized_style}"
+            if sanitized_style:
+                combined_system = f"{combined_system}\n\nUSER STYLE PROMPT: {sanitized_style}"
 
         # 1. Try Cloudflare Worker AI Base URL
         if self.worker_base_url:
@@ -1648,14 +1677,7 @@ class EnterpriseRAGPipeline:
                     headers = {"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"}
                     messages = [
                         {"role": "system", "content": combined_system},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"You must answer the user question using ONLY the provided verified document context.\n\n"
-                                f"<DOCUMENT_CONTEXT>\n{context}\n</DOCUMENT_CONTEXT>\n\n"
-                                f"Question: {query}"
-                            )
-                        }
+                        {"role": "user", "content": query}
                     ]
                     resp = requests.post(url, headers=headers, json={"messages": messages, "temperature": temperature}, timeout=45)
                     if resp.status_code == 200:
