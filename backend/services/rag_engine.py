@@ -1045,6 +1045,18 @@ class GroundedCitationVerifier:
         if any(w in lower_q_raw for w in ["candidate", "resume", "pdf", "document", "cv", "person", "profile", "path", "he", "she", "his", "her", "him", "them", "their", "individual", "applicant", "engineer", "analyst", "who is", "about"]):
             expanded_match_words.update(["summary", "professional", "education", "experience", "skills", "projects", "internship", "innovate", "cyber", "security", "ml", "ai", "b.tech", "jntu", "excel", "power bi", "python", "telangana", "hyderabad", "khammam"])
 
+        # Methodology / Experimental Setup mapping
+        if any(w in lower_q_raw for w in ["method", "methodology", "approach", "experiment", "setup", "process", "system", "test", "testing", "evaluation", "design"]):
+            expanded_match_words.update(["methodology", "experimental", "setup", "approach", "testing", "results", "analysis", "system", "process", "design", "evaluation"])
+
+        # Conclusions / Discussion / Limitations mapping
+        if any(w in lower_q_raw for w in ["conclusion", "summary", "limitations", "recommendation", "future", "discussion"]):
+            expanded_match_words.update(["conclusion", "conclusions", "future", "work", "limitations", "discussion", "recommendations", "summary"])
+
+        # Legal / Contracts mapping
+        if any(w in lower_q_raw for w in ["agreement", "contract", "clause", "liability", "termination", "payment", "obligation", "obligations"]):
+            expanded_match_words.update(["agreement", "contract", "clause", "clauses", "liability", "termination", "payment", "obligations"])
+
         extracted_items = []
         seen_quotes: Set[str] = set()
 
@@ -1695,7 +1707,7 @@ class EnterpriseRAGPipeline:
             all_chunks.sort(key=lambda x: x["metadata"].get("page_number", 0))
             return all_chunks[:top_k]
 
-        # For large documents: if it's an abstract query, use HyDE (Hypothetical Document Embeddings) to improve matching
+        # For large documents: if it's an abstract query, use HyDE
         search_query = sub_q
         if is_broad:
             search_query = self._generate_hyde_query(sub_q)
@@ -1712,6 +1724,12 @@ class EnterpriseRAGPipeline:
                 expansion_terms = "projects, designed, implemented, developed system, technology stack"
             elif any(w in lower_sub_q for w in ["contact", "email", "phone", "location", "live", "address", "from", "reach"]):
                 expansion_terms = "contact details, email address, phone number, location, address"
+            elif any(w in lower_sub_q for w in ["method", "methodology", "approach", "experiment", "setup", "process", "system", "test", "testing", "evaluation", "design"]):
+                expansion_terms = "methodology, experimental setup, approach, testing, analysis, process, system, design, evaluation"
+            elif any(w in lower_sub_q for w in ["conclusion", "summary", "limitations", "recommendation", "future", "discussion"]):
+                expansion_terms = "conclusions, limitations, future work, discussion, recommendations, summary"
+            elif any(w in lower_sub_q for w in ["agreement", "contract", "clause", "liability", "termination", "payment", "obligation", "obligations"]):
+                expansion_terms = "agreement terms, contract clause, liability, termination, payment obligations"
 
             if expansion_terms:
                 search_query = f"{sub_q} {expansion_terms}"
