@@ -734,30 +734,28 @@ class QueryRewriter:
             response_format = "prose"
             targets = []
 
-        # 2. Check Ambiguity and Clarification triggers
+        # 2. Check Ambiguity and Clarification triggers (simplified to support any terms)
         ambiguity = False
         clarification_needed = False
         clarification_question = ""
 
-        if "list it" in lower_q or (re.search(r'\blist\b', lower_q) and not any(x in lower_q for x in ["points", "items", "terms", "clauses", "dates", "names", "numbers", "obligations", "requirements", "details", "everything", "facts", "skills", "projects", "experience", "education", "certifications", "tools", "technologies", "languages", "jobs", "roles", "hobbies", "activities", "contacts", "history"])):
+        words = lower_q.split()
+        if not words:
             ambiguity = True
             clarification_needed = True
-            clarification_question = "What specifically would you like me to list from the document?"
-
-        elif "compare" in lower_q and not any(x in lower_q for x in ["sections", "terms", "concepts", "clauses", "versions", "and", "vs", "versus", "skills", "projects", "experience", "education", "candidates", "resumes", "documents", "applicants"]):
+            clarification_question = "Please provide a query or question to search the document."
+        elif len(words) == 1 and words[0] in ["list", "compare", "extract", "summarize", "summarise", "explain", "analyze", "analyse", "show"]:
             ambiguity = True
             clarification_needed = True
-            clarification_question = "What specific sections, terms, or versions would you like me to compare?"
-
-        elif "extract" in lower_q and not any(x in lower_q for x in ["names", "dates", "invoices", "totals", "clauses", "risks", "items", "fields", "skills", "projects", "experience", "education", "details", "entities", "text", "information"]):
+            clarification_question = f"What specifically would you like me to {words[0]} from the document?"
+        elif lower_q in ["list it", "list out", "compare them", "extract them", "summarize it", "explain it", "analyze it", "show it"]:
             ambiguity = True
             clarification_needed = True
-            clarification_question = "Which specific fields (e.g., names, dates, amounts) would you like me to extract?"
-
-        elif intent == "unknown":
+            clarification_question = "What specific topic or content would you like me to process?"
+        elif intent == "unknown" and (len(words) <= 1 or not any(c.isalnum() for c in lower_q)):
             ambiguity = True
             clarification_needed = True
-            clarification_question = "Please provide more details on what you would like to analyze, extract, or ask about the document."
+            clarification_question = "Please provide more details on what you would like to ask about the document."
 
         # 3. Formulate Search-Friendly Query
         rewritten_query = lower_q
