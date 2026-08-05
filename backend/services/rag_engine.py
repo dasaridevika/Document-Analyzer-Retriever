@@ -1145,30 +1145,43 @@ class RAGEngine:
             except Exception as e:
                 logger.warning(f"Worker AI call failed: {e}")
 
-        # 2. Try Direct Cloudflare REST API
+        # 2. Try Direct Cloudflare REST API with failover model chain
         if self.account_id and self.api_token and "placeholder" not in self.account_id:
-            try:
-                url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.llm_model}"
-                headers = {"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"}
-                messages = [
-                    {"role": "system", "content": combined_system},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"You must answer the user question using ONLY the provided verified document context.\n\n"
-                            f"<DOCUMENT_CONTEXT>\n{context}\n</DOCUMENT_CONTEXT>\n\n"
-                            f"Question: {query}"
-                        )
-                    }
-                ]
-                resp = requests.post(url, headers=headers, json={"messages": messages, "temperature": temperature}, timeout=45)
-                if resp.status_code == 200:
-                    raw_text = resp.text
-                    payload = _extract_json_payload(resp.json())
-                    if payload:
-                        return raw_text, payload
-            except Exception as e:
-                logger.warning(f"Direct Cloudflare REST API failed: {e}")
+            models_to_try = [
+                self.llm_model,
+                "@cf/meta/llama-3.1-70b-instruct",
+                "@cf/meta/llama-3-8b-instruct",
+                "@cf/mistral/mistral-7b-instruct-v0.1"
+            ]
+            models_to_try = list(dict.fromkeys([m for m in models_to_try if m]))
+
+            for model_name in models_to_try:
+                try:
+                    logger.info(f"Attempting LLM call with model: {model_name}...")
+                    url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{model_name}"
+                    headers = {"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"}
+                    messages = [
+                        {"role": "system", "content": combined_system},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"You must answer the user question using ONLY the provided verified document context.\n\n"
+                                f"<DOCUMENT_CONTEXT>\n{context}\n</DOCUMENT_CONTEXT>\n\n"
+                                f"Question: {query}"
+                            )
+                        }
+                    ]
+                    resp = requests.post(url, headers=headers, json={"messages": messages, "temperature": temperature}, timeout=45)
+                    if resp.status_code == 200:
+                        raw_text = resp.text
+                        payload = _extract_json_payload(resp.json())
+                        if payload:
+                            logger.info(f"LLM call succeeded with model: {model_name}")
+                            return raw_text, payload
+                    else:
+                        logger.warning(f"Model {model_name} returned status code {resp.status_code}: {resp.text}")
+                except Exception as e:
+                    logger.warning(f"Model {model_name} REST API failed: {e}")
 
         return None, None
 
