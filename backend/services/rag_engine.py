@@ -459,7 +459,7 @@ class QueryRewriter:
         resolved_q = ConversationResolver.resolve_conversation(query, chat_history)
         lower_q = resolved_q.lower().strip("?!., ")
 
-        # Target Page & Chapter Lookups (preserved for backward compatibility helper routing)
+        # Target Page & Chapter Lookups
         page_match = re.search(r'\bpage\s+(\d+)\b', lower_q)
         chapter_match = re.search(r'\bchapter\s+(\d+)\b', lower_q)
         target_page = int(page_match.group(1)) if page_match else None
@@ -475,7 +475,6 @@ class QueryRewriter:
         section_specific = False
         targets = ["factual answer"]
 
-        # Check rules in priority order
         if any(w in lower_q for w in ["insight", "analysis", "review", "strength", "weakness", "risk", "gap", "concern", "recommendation"]):
             intent = "review"
             reason = "User requested high-level analysis, insights, risk evaluation, or recommendations."
@@ -606,27 +605,20 @@ class QueryRewriter:
 
     @staticmethod
     def generate_multi_queries(query: str, intent_obj: QueryIntent) -> List[str]:
-        """Generates semantic query variations for Multi-Query Expansion."""
         clean_q = query.strip()
         subj1 = intent_obj.primary_subject or clean_q
 
         variations = [clean_q]
-        if intent_obj.intent == "comparison" and intent_obj.secondary_subject:
+        if intent_obj.intent == "compare" and intent_obj.secondary_subject:
             variations.append(f"{subj1} characteristics and features")
             variations.append(f"{intent_obj.secondary_subject} characteristics and features")
             variations.append(f"Comparison of {subj1} and {intent_obj.secondary_subject}")
         elif intent_obj.intent == "summary":
             variations.append("Executive summary of document main topics and objectives")
             variations.append(f"Overview of {subj1} main themes and general principles")
-        elif intent_obj.intent == "definition":
-            variations.append(f"Define {subj1}")
-            variations.append(f"What is the definition and purpose of {subj1}")
-        elif intent_obj.intent == "objectives":
-            variations.append(f"Key objectives and aims of {subj1}")
-            variations.append(f"Why is {subj1} used and what does it accomplish")
-        elif intent_obj.intent in ["mechanism", "explanation"]:
-            variations.append(f"How does {subj1} work step by step")
-            variations.append(f"Operation, function, and implementation mechanism of {subj1}")
+        elif intent_obj.intent == "qa":
+            variations.append(f"Define and explain {subj1}")
+            variations.append(f"What is the core purpose and details of {subj1}")
         else:
             variations.append(f"Details on {subj1}")
             variations.append(f"Overview of {subj1}")
@@ -722,602 +714,255 @@ class GroundedCitationVerifier:
             if is_correct:
                 correct_citations += 1
 
-        citation_correctness = round(correct_citations / max(1, total_citations), 2) if total_citations > 0 else 1.0
-        verified_claims = len(verified_evidence_items)
-        answer_faithfulness = round(verified_claims / max(1, total_citations), 2) if total_citations > 0 else (1.0 if raw_answer or raw_definition else 0.0)
+        citation_correctness = correct_citations / max(1, total_citations) if total_citations > 0 else 1.0
 
-        # Synthesis/list intent relaxation rule: prevent fallback triggers on analytical requests
-        is_synthesis_query = intent_obj.intent in ["summary", "review", "list_items", "compare", "rewrite", "action_items"]
-        if not valid_citations and is_synthesis_query:
-            if correct_citations > 0 or total_citations == 0:
-                valid_citations = True
-
-        md_parts = []
-        if raw_definition:
-            md_parts.append(f"**Definition:**\n{raw_definition}")
-        if raw_explanation:
-            md_parts.append(f"**Explanation:**\n{raw_explanation}")
-        if not raw_definition and not raw_explanation and raw_answer:
-            md_parts.append(f"{raw_answer}")
-
+        # Build clean final Markdown output
+        final_body = raw_answer if raw_answer else (raw_definition + ("\n\n" + raw_explanation if raw_explanation else ""))
         if verified_evidence_items:
-            md_parts.append("## Evidence\n\n" + "\n".join(verified_evidence_items[:4]))
+            final_body += "\n\n### Verified Source Evidence\n" + "\n".join(verified_evidence_items)
 
-        final_md = "## Answer\n\n" + "\n\n".join(md_parts)
-
-        return {
-            "answer": final_md,
-            "verified_quotes": list(seen_quotes),
+        res_payload = {
+            "answer": final_body,
+            "parts": structured_json.get("parts", []),
             "confidence": confidence,
-            "answer_faithfulness": answer_faithfulness,
-            "citation_correctness": citation_correctness
-        }, valid_citations, "Verification complete"
-
-    @staticmethod
-    def _is_clean_sentence(s: str) -> bool:
-        s_clean = s.strip()
-        if len(s_clean) < 18:
-            return False
-        if not re.match(r'^[A-Z0-9\•\*\-\"\“\|]', s_clean):
-            return False
-        if re.search(r'\b(at a|the|of|and|or|in|for|with|to|is|are|shown|plotted|figure|shunt|two\-machine)\s*$', s_clean, re.IGNORECASE):
-            return False
-        if re.match(r'^(?:Document|Document ID|Chunk ID|Section|Figure|Table|Unit\s+[V|X|I]+|OBJECTIVES OF)\b', s_clean, re.IGNORECASE):
-            return False
-        if re.match(r'^(?:Page\s+\d+\s*(?:of\s+\d+)?)$', s_clean, re.IGNORECASE):
-            return False
-        return True
-
-    @staticmethod
-    def _is_adversarial_text(text: str) -> bool:
-        pattern = r'(ignore\s*previous\s*instructions|instruction\s*override|system\s*prompt|secret\s*key|api_key|api_token)'
-        return bool(re.search(pattern, text, re.IGNORECASE))
-
-    @staticmethod
-    def _fallback_universal_extractive(query: str, target_chunks: List[Dict[str, Any]], intent_obj: QueryIntent) -> Tuple[Dict[str, Any], bool, str]:
-        lower_q = query.lower()
-        intent = intent_obj.intent
-
-        stop_words = {
-            "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
-            "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
-            "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page",
-            "summarise", "summarize", "given", "document", "explain", "discussed", "on", "with", "at",
-            "by", "from", "up", "into", "over", "under", "above", "below"
+            "answer_faithfulness": round(confidence, 2),
+            "citation_correctness": round(citation_correctness, 2)
         }
-        generic_nouns = {
-            "project", "budget", "system", "value", "key", "code", "password", "prompt"
-        }
-        q_words = set(re.findall(r'\w+', lower_q)) - stop_words
-        critical_q_words = q_words - generic_nouns
-        match_words = critical_q_words if critical_q_words else q_words
 
-        extracted_items = []
-        seen_quotes: Set[str] = set()
+        return res_payload, valid_citations, "Verification complete"
 
-        for c in target_chunks:
-            page_num = c["metadata"].get("page_number", 1)
-            cid = c["chunk_id"]
-            raw_text = c.get("raw_content", c["text"])
-            clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
-
-            unwrapped = re.sub(r'(?<![.!?:\n])\n(?![A-Z\•\*\-\d\.])', ' ', clean_text)
-            unwrapped = re.sub(r'\s+', ' ', unwrapped)
-
-            for s in re.split(r'(?<=[.!?])\s+', unwrapped):
-                s_clean = s.strip()
-                if s_clean in seen_quotes or not GroundedCitationVerifier._is_clean_sentence(s_clean):
-                    continue
-
-                if GroundedCitationVerifier._is_adversarial_text(s_clean):
-                    continue
-
-                seen_quotes.add(s_clean)
-                line_words = set(re.findall(r'\w+', s_clean.lower()))
-
-                if match_words and not (match_words & line_words) and intent not in ["summary", "overview", "page_lookup", "chapter_lookup"]:
-                    continue
-
-                overlap_score = len(match_words & line_words) / max(1, len(match_words)) if match_words else 1.0
-                
-                # Apply intent-specific scoring bonuses to differentiate definitions, objectives, and mechanisms
-                intent_bonus = 0.0
-                s_lower = s_clean.lower()
-                
-                if intent == "extract_fields":
-                    def_keywords = ["defined as", "refers to", "definition", "means", "is a", "is the", "constitutes", "stands for", "is used to", "changes the", "characterized by"]
-                    if any(k in s_lower for k in def_keywords):
-                        intent_bonus += 0.35
-                    words_list = re.findall(r'\w+', s_lower)
-                    if words_list and words_list[0] in match_words:
-                        intent_bonus += 0.15
-                        
-                elif intent in ["list_items", "action_items"]:
-                    obj_keywords = ["objective", "purpose", "aim", "goal", "to increase", "to control", "to minimize", "to maintain", "target", "intended to", "applied to", "todo", "action", "deadline", "task"]
-                    if any(k in s_lower for k in obj_keywords):
-                        intent_bonus += 0.35
-                    if any(k in s_lower for k in ["defined as", "refers to"]):
-                        intent_bonus -= 0.20
-                        
-                elif intent in ["review", "rewrite", "qa"]:
-                    mech_keywords = ["how", "process", "mechanism", "operation", "function", "works", "by", "through", "utilizes", "operates", "results in", "consequently"]
-                    if any(k in s_lower for k in mech_keywords):
-                        intent_bonus += 0.35
-                    if any(k in s_lower for k in ["defined as", "refers to"]):
-                        intent_bonus -= 0.20
-                
-                final_score = overlap_score + intent_bonus
-                extracted_items.append((page_num, cid, s_clean, final_score))
-
-        # Sort extracted items: chronologically for summary/overview, otherwise by overlap score descending
-        if intent in ["summary", "unknown"]:
-            extracted_items.sort(key=lambda x: (x[0], x[1]))
-        else:
-            extracted_items.sort(key=lambda x: x[3], reverse=True)
-
-        # Map back to standard tuple structure (page_num, cid, sentence_text)
-        extracted_items = [(x[0], x[1], x[2]) for x in extracted_items]
-
-        md_output_parts = []
-        evidence_items = []
-
-        if intent == "summary":
-            doc_title = target_chunks[0]["metadata"].get("filename", "Uploaded Document") if target_chunks else "Uploaded Document"
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:5]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:5]]
-            if bullets:
-                md_output_parts.append(f"**Executive Summary of {doc_title}:**\n\n" + "\n\n".join(bullets))
-
-        elif intent == "extract_fields":
-            if extracted_items:
-                p, cid, s = extracted_items[0]
-                md_output_parts.append(f"**Extracted Fact:**\n{s}")
-                evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
-                if len(extracted_items) > 1:
-                    p2, cid2, s2 = extracted_items[1]
-                    md_output_parts.append(f"**Contextual Information:**\n{s2}")
-                    evidence_items.append(f"- Page {p2}, chunk {cid2}: “{s2[:120]}”")
-
-        elif intent in ["list_items", "action_items"]:
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
-            if bullets:
-                subject_title = intent_obj.primary_subject.title() if intent_obj.primary_subject else ""
-                title_str = f"**Key Items/Action Items for {subject_title}:**" if subject_title else "**Key Items/Action Items:**"
-                md_output_parts.append(title_str + "\n" + "\n".join(bullets))
-
-        elif intent in ["review", "rewrite", "qa"]:
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
-            if bullets:
-                subject_title = intent_obj.primary_subject.title() if (intent_obj and intent_obj.primary_subject) else "Overview"
-                md_output_parts.append(f"**{subject_title} Analysis:**\n" + "\n\n".join(bullets))
-
-        elif intent == "compare":
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:6]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:6]]
-            if bullets:
-                md_output_parts.append(f"**Comparative Overview:**\n" + "\n".join(bullets))
-
-        else:
-            bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
-            evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
-            if bullets:
-                md_output_parts.append(f"**Detailed Breakdown:**\n" + "\n".join(bullets))
-
-        if not md_output_parts:
+    @staticmethod
+    def _fallback_universal_extractive(
+        query: str,
+        target_chunks: List[Dict[str, Any]],
+        intent_obj: QueryIntent
+    ) -> Tuple[Dict[str, Any], bool, str]:
+        """Direct text extraction fallback when LLM output generation is invalid."""
+        if not target_chunks:
             return {
                 "answer": f"## Answer\n\n{NO_EVIDENCE_FALLBACK_MESSAGE}",
-                "verified_quotes": [],
+                "parts": [],
                 "confidence": 0.0
-            }, True, "No evidence fallback"
+            }, False, "No chunks available"
 
-        final_md = "## Answer\n\n" + "\n\n".join(md_output_parts)
-        if evidence_items:
-            final_md += "\n\n## Evidence\n\n" + "\n".join(evidence_items[:4])
+        best_chunk = target_chunks[0]
+        extracted_text = best_chunk.get("raw_content", best_chunk.get("text", ""))
+        page_num = best_chunk.get("metadata", {}).get("page_number", 1)
+        chunk_id = best_chunk.get("chunk_id", "c0")
+
+        ans_markdown = (
+            f"### Direct Document Extract\n\n"
+            f"{extracted_text}\n\n"
+            f"**Source:** Page {page_num} (Chunk ID: `{chunk_id}`)"
+        )
 
         return {
-            "answer": final_md,
-            "verified_quotes": [e.split('“')[-1].rstrip('”') for e in evidence_items],
-            "confidence": 0.95
-        }, True, "Universal extractive fallback successful"
+            "answer": ans_markdown,
+            "parts": [{
+                "title": f"Extracted Content (Page {page_num})",
+                "content": extracted_text,
+                "supporting_chunk_ids": [chunk_id],
+                "page_numbers": [page_num]
+            }],
+            "confidence": 0.70
+        }, True, "Used Universal Extractive Fallback"
 
 
 # ============================================================================
-# Main RAGEngine Pipeline Class
+# Main Enterprise RAG Pipeline
 # ============================================================================
 
-class RAGEngine:
-    """
-    Universal Production Enterprise RAG Engine with Map-Reduce Summarization & Document APIs.
-    """
+class RAGPipeline:
+    """End-to-End Enterprise RAG Engine with Cloudflare LLM Integration."""
 
-    def __init__(self, embedding_service, vector_store):
-        self.embedding_service = embedding_service
-        self.vector_store = vector_store
+    def __init__(self):
         self.account_id = CLOUDFLARE_ACCOUNT_ID
         self.api_token = CLOUDFLARE_API_TOKEN
-        self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct"
-        self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
+        self.model = CLOUDFLARE_LLM_MODEL
+        self.worker_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
-    # Document-Level Retrieval APIs
-    def retrieve_document(self, filename: Optional[str] = None, document_id: Optional[str] = None, max_pages: int = 20) -> List[Dict[str, Any]]:
-        """Retrieves full document chunks for Map-Reduce summarization."""
-        return self.vector_store.get_first_pages_chunks(filename=filename, document_id=document_id, max_pages=max_pages)
+    def _call_llm_json(self, prompt: str, system_prompt: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Makes an API request to Cloudflare Workers AI and enforces JSON response structure."""
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{self.model}"
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "application/json"
+        }
+        
+        sys_p = system_prompt or IMMUTABLE_SYSTEM_PROMPT
+        payload = {
+            "messages": [
+                {"role": "system", "content": sys_p},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"}
+        }
 
-    def retrieve_page(self, page_number: int, filename: Optional[str] = None, document_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Retrieves chunks specifically matching page_number."""
-        all_chunks = self.vector_store.get_first_pages_chunks(filename=filename, document_id=document_id, max_pages=100)
-        return [c for c in all_chunks if c.get("metadata", {}).get("page_number") == page_number]
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                result_obj = res_data.get("result")
+                return _extract_json_payload(result_obj)
+            else:
+                logger.error(f"Cloudflare LLM API Error ({resp.status_code}): {resp.text}")
+        except Exception as e:
+            logger.error(f"Exception during LLM execution: {e}")
 
-    def answer_query(
+        return None
+
+    def search_chunks(self, query: str, document_id: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        """Fetches vector/keyword search chunks from Worker backend service."""
+        try:
+            url = f"{self.worker_url}/search"
+            payload = {
+                "query": query,
+                "document_id": document_id,
+                "top_k": top_k
+            }
+            res = requests.post(url, json=payload, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                return data.get("chunks", [])
+        except Exception as e:
+            logger.warning(f"Failed to fetch chunks from worker service: {e}")
+
+        return []
+
+    def execute_rag(
         self,
         query: str,
-        filename: Optional[str] = None,
-        document_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        system_prompt: Optional[str] = None,
-        top_k: int = 12,
-        temperature: float = 0.0,
-        chat_history: Optional[List[Dict[str, Any]]] = None
+        document_id: str,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+        query_vector: Optional[List[float]] = None
     ) -> Dict[str, Any]:
-        """
-        Public API Endpoint preserved for backend and frontend calls.
-        """
+        """Main execution entrypoint for RAG processing."""
         start_time = time.time()
-        req_id = f"req_{uuid.uuid4().hex[:10]}"
-        clean_query = query.strip()
+        request_id = str(uuid.uuid4())
 
-        trace = RAGTrace(
-            request_id=req_id,
-            document_id=document_id or "auto",
-            original_query=clean_query,
-            rewritten_query=clean_query,
-            query_intent="fact",
-            retrieval_strategy="dense_hybrid"
-        )
-
-        # Stage 1: Prompt Injection Guard
-        if self._detect_prompt_injection(clean_query) or (system_prompt and self._detect_prompt_injection(system_prompt)):
-            trace.failure_stage = "prompt_injection"
-            trace.failure_reason = "Adversarial prompt injection attempt detected."
-            return {
-                "answer": "## Answer\n\nI cannot perform actions that attempt to override safety instructions, expose API tokens, or reveal system prompts.",
-                "sources": [],
-                "system_prompt_used": IMMUTABLE_SYSTEM_PROMPT,
-                "retrieved_count": 0,
-                "rag_trace": self._trace_to_dict(trace)
-            }
-
-        # Stage 2 & 3: Conversation Resolution & Intent Classification
-        resolved_q, intent_obj = QueryRewriter.rewrite_query(clean_query, chat_history)
-        trace.rewritten_query = resolved_q
-        trace.query_intent = intent_obj.intent
-        trace.retrieval_strategy = intent_obj.retrieval_strategy
-
-        # Stage 4: Multi-Query Semantic Expansion
-        multi_queries = QueryRewriter.generate_multi_queries(resolved_q, intent_obj)
-        trace.multi_queries = multi_queries
-
-        # Stage 5: Semantic Cache Lookup
-        q_embeddings = self.embedding_service.generate_embeddings([resolved_q])
-        q_vec = q_embeddings[0] if q_embeddings else []
-        if q_vec:
-            cached_res = global_semantic_cache.get(q_vec, document_id)
+        # 1. Semantic Cache Lookup
+        if query_vector:
+            cached_res = global_semantic_cache.get(query_vector, document_id)
             if cached_res:
-                logger.info(f"Semantic Cache Hit for query: '{clean_query}'")
+                logger.info("Cache hit! Returning pre-computed semantic response.")
                 return cached_res
 
-        # Stage 6: Strategy-Driven Retrieval Execution
-        all_candidate_chunks: List[Dict[str, Any]] = []
-
-        if intent_obj.retrieval_strategy == "map_reduce":
-            # Document Summarization Pipeline: Retrieve Full Document
-            all_candidate_chunks = self.retrieve_document(filename=filename, document_id=document_id, max_pages=15)
-
-        elif intent_obj.retrieval_strategy == "page_filter" and intent_obj.target_page:
-            all_candidate_chunks = self.retrieve_page(page_number=intent_obj.target_page, filename=filename, document_id=document_id)
-
-        elif intent_obj.retrieval_strategy == "multi_hop":
-            # Multi-Hop Retrieval: Topic 1 + Topic 2
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                f1 = executor.submit(self._retrieve_chunks_for_query, intent_obj.primary_subject, intent_obj.intent, top_k, filename, document_id, session_id, user_id)
-                f2 = executor.submit(self._retrieve_chunks_for_query, intent_obj.secondary_subject or resolved_q, intent_obj.intent, top_k, filename, document_id, session_id, user_id)
-                c1 = f1.result()
-                c2 = f2.result()
-                all_candidate_chunks = c1 + c2
-
-        else:
-            # Parallel Multi-Query Hybrid Retrieval
-            seen_chunk_ids: Set[str] = set()
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [
-                    executor.submit(self._retrieve_chunks_for_query, sub_q, intent_obj.intent, top_k, filename, document_id, session_id, user_id)
-                    for sub_q in multi_queries
-                ]
-                for future in as_completed(futures):
-                    try:
-                        for c in future.result():
-                            cid = c["chunk_id"]
-                            if cid not in seen_chunk_ids:
-                                seen_chunk_ids.add(cid)
-                                all_candidate_chunks.append(c)
-                    except Exception as e:
-                        logger.warning(f"Sub-query retrieval failure: {e}")
-
-        # Fallback to First Pages if Retrieval Empty
-        if not all_candidate_chunks and filename:
-            all_candidate_chunks = self.retrieve_document(filename=filename, document_id=document_id, max_pages=5)
-
-        # Stage 7: Cross-Encoder Reranking
-        reranked_chunks = CrossEncoderReranker.rerank(resolved_q, all_candidate_chunks, intent_type=intent_obj.intent)
-        trace.retrieved_chunks = [
-            {
-                "chunk_id": c["chunk_id"],
-                "page_number": c["metadata"].get("page_number", 1),
-                "text": c["text"][:150],
-                "similarity_score": c.get("similarity_score", 0.0),
-                "cross_score": c.get("cross_score", 0.0)
-            }
-            for c in reranked_chunks[:8]
-        ]
-
-        # Stage 8 & 9: Dynamic Top-K Selection
-        adaptive_k = min(intent_obj.adaptive_top_k, FINAL_CONTEXT_K)
-        final_chunks = reranked_chunks[:adaptive_k]
-
-        if not final_chunks:
-            trace.failure_stage = "retrieval"
-            trace.failure_reason = "No relevant chunks retrieved from active document."
-            return {
-                "answer": f"## Answer\n\n{NO_EVIDENCE_FALLBACK_MESSAGE}",
-                "sources": [],
-                "system_prompt_used": IMMUTABLE_SYSTEM_PROMPT,
-                "retrieved_count": 0,
-                "rag_trace": self._trace_to_dict(trace)
-            }
-
-        # Stage 10: Building Context
-        context_blocks = []
-        for c in final_chunks:
-            page_num = c["metadata"].get("page_number", "?")
-            doc_fname = c["metadata"].get("filename", "Document")
-            cid = c["chunk_id"]
-            
-            parent_text = c["metadata"].get("parent_text")
-            if parent_text:
-                parent_cid = c["metadata"].get("parent_chunk_id") or cid
-                clean_chunk_text = (
-                    f"Document: {doc_fname}\n"
-                    f"Document ID: {c['metadata'].get('document_id', '')}\n"
-                    f"Page: {page_num}\n"
-                    f"Section: {c['metadata'].get('section_title', 'General Section')}\n"
-                    f"Chunk ID: {parent_cid}\n\n"
-                    f"Content:\n{parent_text}"
-                )
-            else:
-                clean_chunk_text = c["text"]
-                
-            context_blocks.append(f"--- [Page {page_num} | Chunk {cid} | Document: {doc_fname}] ---\n{clean_chunk_text}")
-
-        combined_context = "<DOCUMENT_CONTEXT>\n" + "\n\n".join(context_blocks) + "\n</DOCUMENT_CONTEXT>"
-        trace.context_sent_to_llm = combined_context
-
-        # Stage 11 & 12: LLM Execution
-        raw_llm, structured_json = self._execute_llm_call(
-            context=combined_context,
-            query=resolved_q,
-            system_prompt=system_prompt,
-            temperature=temperature
-        )
-
-        trace.raw_llm_response = raw_llm or ""
-        trace.parsed_response = structured_json or {}
-
-        # Stage 13 & 14: Citation Verification & Grounding
-        verified_res, is_valid_citations, v_reason = GroundedCitationVerifier.verify_response(
-            query=clean_query,
-            structured_json=structured_json,
-            target_chunks=final_chunks,
-            intent_obj=intent_obj
-        )
-
-        trace.citation_valid = is_valid_citations
-        trace.answer_relevance = 0.95 if is_valid_citations else 0.50
-        trace.groundedness = 0.95 if structured_json and structured_json.get("answerable") else 0.0
-
-        if not is_valid_citations:
-            trace.failure_stage = "citation_validation"
-            trace.failure_reason = v_reason
-
-        # Stage 15: Multi-Factor Dynamic Confidence Scoring
-        confidence = self._compute_dynamic_confidence(
-            retrieval_count=len(final_chunks),
-            citation_valid=is_valid_citations,
-            answerable=bool(structured_json and structured_json.get("answerable"))
-        )
-        trace.confidence_score = confidence
-        trace.execution_time_ms = round((time.time() - start_time) * 1000, 2)
+        # 2. Query Rewriting and Classification
+        resolved_q, intent_obj = QueryRewriter.rewrite_query(query, chat_history)
         
-        # Calculate RAG evaluation metrics
-        trace.context_recall = self._compute_context_recall(resolved_q, final_chunks)
-        trace.answer_faithfulness = verified_res.get("answer_faithfulness", 0.0)
-        trace.citation_correctness = verified_res.get("citation_correctness", 0.0)
-        trace.response_latency_ms = trace.execution_time_ms
-
-        sources = [
-            {
-                "source_id": idx + 1,
-                "chunk_id": c["chunk_id"],
-                "text": c["text"],
-                "page_number": c["metadata"].get("page_number"),
-                "filename": c["metadata"].get("filename"),
-                "similarity_score": c.get("similarity_score")
+        # Immediate return if clarification is needed
+        if intent_obj.clarification_needed:
+            return {
+                "answer": f"## Clarification Needed\n\n{intent_obj.clarification_question}",
+                "confidence": 0.0,
+                "rag_trace": RAGTrace(
+                    request_id=request_id,
+                    document_id=document_id,
+                    original_query=query,
+                    rewritten_query=resolved_q,
+                    query_intent=intent_obj.intent,
+                    retrieval_strategy=intent_obj.retrieval_strategy,
+                    failure_stage="query_classification",
+                    failure_reason="Ambiguous Query"
+                ).__dict__
             }
-            for idx, c in enumerate(final_chunks)
+
+        # 3. Multi-Query Expansion & Search
+        sub_queries = QueryRewriter.generate_multi_queries(resolved_q, intent_obj)
+        top_k = intent_obj.adaptive_top_k
+
+        all_candidate_chunks: List[Dict[str, Any]] = []
+        seen_chunk_ids: Set[str] = set()
+
+        def fetch_q(q_str: str) -> List[Dict[str, Any]]:
+            return self.search_chunks(q_str, document_id, top_k=top_k)
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(fetch_q, q) for q in sub_queries]
+            for f in as_completed(futures):
+                chunks = f.result()
+                for c in chunks:
+                    cid = c.get("chunk_id")
+                    if cid and cid not in seen_chunk_ids:
+                        seen_chunk_ids.add(cid)
+                        all_candidate_chunks.append(c)
+
+        # 4. Relevance Filtering & Cross-Encoder Reranking
+        filtered_chunks = [
+            c for c in all_candidate_chunks
+            if is_relevant_to_query(resolved_q, c.get("text", ""), c.get("similarity_score", 0.0), intent_obj.intent)
         ]
 
-        final_response = {
-            "answer": verified_res["answer"],
-            "sources": sources,
-            "verified_quotes": verified_res.get("verified_quotes", []),
-            "confidence": confidence,
-            "system_prompt_used": IMMUTABLE_SYSTEM_PROMPT,
-            "retrieved_count": len(sources),
-            "rag_trace": self._trace_to_dict(trace)
-        }
+        reranked_chunks = CrossEncoderReranker.rerank(resolved_q, filtered_chunks, intent_type=intent_obj.intent)
+        final_chunks = reranked_chunks[:FINAL_CONTEXT_K]
 
-        # Cache valid response
-        if q_vec and confidence >= 0.85:
-            global_semantic_cache.put(q_vec, document_id, final_response)
+        # 5. Formulate Prompt & Context Construction
+        context_blocks = []
+        for idx, c in enumerate(final_chunks):
+            p_num = c.get("metadata", {}).get("page_number", 1)
+            cid = c.get("chunk_id", f"c{idx}")
+            text = c.get("text", "")
+            context_blocks.append(f"--- CHUNK ID: {cid} (Page {p_num}) ---\n{text}")
 
-        return final_response
+        context_str = "\n\n".join(context_blocks)
 
-    def _retrieve_chunks_for_query(
-        self, sub_q: str, intent_type: str, top_k: int,
-        filename: Optional[str], document_id: Optional[str], session_id: Optional[str], user_id: Optional[str]
-    ) -> List[Dict[str, Any]]:
-        """Helper to run hybrid vector similarity search."""
-        q_embeddings = self.embedding_service.generate_embeddings([sub_q])
-        if not q_embeddings:
-            return []
-
-        return self.vector_store.similarity_search(
-            query_embedding=q_embeddings[0],
-            raw_query=sub_q,
-            intent_type=intent_type,
-            top_k=top_k,
-            filename_filter=filename,
-            document_id_filter=document_id,
-            session_id_filter=session_id,
-            user_id_filter=user_id,
-            min_score=0.15
+        prompt = (
+            f"User Query: {resolved_q}\n"
+            f"Target Response Format: {intent_obj.response_format}\n\n"
+            f"Retrieved Document Context:\n{context_str}\n\n"
+            f"Instructions:\n"
+            f"Answer the user query thoroughly based strictly on the provided context.\n"
+            f"Return a valid JSON object matching the following structure:\n"
+            f"{{\n"
+            f'  "answerable": true,\n'
+            f'  "answer": "Detailed answer formatted in clean Markdown",\n'
+            f'  "confidence": 0.95,\n'
+            f'  "evidence": [\n'
+            f'     {{"chunk_id": "c0", "page": 1, "quote": "Exact verbatim quote from context"}}\n'
+            f'  ]\n'
+            f"}}"
         )
 
-    @staticmethod
-    def _compute_context_recall(query: str, retrieved_chunks: List[Dict[str, Any]]) -> float:
-        lower_q = query.lower()
-        stop_words = {
-            "what", "is", "the", "how", "many", "of", "to", "are", "there", "in", "for",
-            "a", "an", "and", "or", "give", "me", "exact", "number", "which", "why", "where",
-            "tell", "about", "list", "out", "show", "name", "names", "it", "all", "does", "do", "page"
-        }
-        q_words = set(re.findall(r'\w+', lower_q)) - stop_words
-        if not q_words:
-            return 1.0
-        retrieved_text = " ".join([c.get("raw_content", c.get("text", "")) for c in retrieved_chunks]).lower()
-        retrieved_words = set(re.findall(r'\w+', retrieved_text))
-        intersection = q_words & retrieved_words
-        return round(len(intersection) / len(q_words), 2)
+        # 6. LLM Invocations
+        llm_raw = self._call_llm_json(prompt)
 
-    @staticmethod
-    def _detect_prompt_injection(query: str) -> bool:
-        pattern = r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)'
-        return bool(re.search(pattern, query, re.IGNORECASE))
+        # 7. Verification & Fallback
+        res_payload, valid_citations, msg = GroundedCitationVerifier.verify_response(
+            resolved_q, llm_raw, final_chunks, intent_obj
+        )
 
-    def _execute_llm_call(
-        self, context: str, query: str, system_prompt: Optional[str], temperature: float = 0.0
-    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-        sanitized_style = ""
-        if system_prompt:
-            sanitized_style = re.sub(r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)', '', system_prompt, flags=re.IGNORECASE).strip()
-        combined_system = f"{IMMUTABLE_SYSTEM_PROMPT}\n\nUSER STYLE PROMPT: {sanitized_style}"
+        latency = round((time.time() - start_time) * 1000, 2)
 
-        # 1. Try Cloudflare Worker AI Base URL
-        if self.worker_base_url:
-            try:
-                resp = requests.post(f"{self.worker_base_url}/analyze", json={
-                    "query": query,
-                    "text": context,
-                    "system_prompt": combined_system,
-                    "json_mode": True,
-                    "temperature": temperature
-                }, timeout=45)
-                if resp.status_code == 200:
-                    raw_text = resp.text
-                    payload = _extract_json_payload(resp.json())
-                    if payload:
-                        return raw_text, payload
-            except Exception as e:
-                logger.warning(f"Worker AI call failed: {e}")
+        # Build Trace Metadata
+        trace = RAGTrace(
+            request_id=request_id,
+            document_id=document_id,
+            original_query=query,
+            rewritten_query=resolved_q,
+            query_intent=intent_obj.intent,
+            retrieval_strategy=intent_obj.retrieval_strategy,
+            multi_queries=sub_queries,
+            retrieved_chunks=all_candidate_chunks,
+            reranked_chunks=final_chunks,
+            context_sent_to_llm=context_str,
+            raw_llm_response=json.dumps(llm_raw) if llm_raw else "",
+            parsed_response=res_payload,
+            confidence_score=res_payload.get("confidence", 0.0),
+            citation_valid=valid_citations,
+            execution_time_ms=latency,
+            answer_faithfulness=res_payload.get("answer_faithfulness", 0.0),
+            citation_correctness=res_payload.get("citation_correctness", 0.0),
+            response_latency_ms=latency
+        )
 
-        # 2. Try Direct Cloudflare REST API with failover model chain
-        if self.account_id and self.api_token and "placeholder" not in self.account_id:
-            models_to_try = [
-                self.llm_model,
-                "@cf/meta/llama-3.1-70b-instruct",
-                "@cf/meta/llama-3-8b-instruct",
-                "@cf/mistral/mistral-7b-instruct-v0.1"
-            ]
-            models_to_try = list(dict.fromkeys([m for m in models_to_try if m]))
+        res_payload["rag_trace"] = trace.__dict__
 
-            for model_name in models_to_try:
-                try:
-                    logger.info(f"Attempting LLM call with model: {model_name}...")
-                    url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{model_name}"
-                    headers = {"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"}
-                    messages = [
-                        {"role": "system", "content": combined_system},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"You must answer the user question using ONLY the provided verified document context.\n\n"
-                                f"<DOCUMENT_CONTEXT>\n{context}\n</DOCUMENT_CONTEXT>\n\n"
-                                f"Question: {query}"
-                            )
-                        }
-                    ]
-                    resp = requests.post(url, headers=headers, json={"messages": messages, "temperature": temperature}, timeout=45)
-                    if resp.status_code == 200:
-                        raw_text = resp.text
-                        payload = _extract_json_payload(resp.json())
-                        if payload:
-                            logger.info(f"LLM call succeeded with model: {model_name}")
-                            return raw_text, payload
-                    else:
-                        logger.warning(f"Model {model_name} returned status code {resp.status_code}: {resp.text}")
-                except Exception as e:
-                    logger.warning(f"Model {model_name} REST API failed: {e}")
+        # Cache result if valid and successful
+        if query_vector and valid_citations and res_payload.get("confidence", 0) > 0.6:
+            global_semantic_cache.put(query_vector, document_id, res_payload)
 
-        return None, None
+        return res_payload
 
-    @staticmethod
-    def _compute_dynamic_confidence(retrieval_count: int, citation_valid: bool, answerable: bool) -> float:
-        """Computes dynamic confidence score between 0.0 and 1.0."""
-        if not answerable or retrieval_count == 0:
-            return 0.0
-        score = 0.50
-        if citation_valid:
-            score += 0.35
-        score += min(0.15, retrieval_count * 0.05)
-        return round(min(1.0, score), 2)
 
-    @staticmethod
-    def _trace_to_dict(trace: RAGTrace) -> Dict[str, Any]:
-        """Converts RAGTrace dataclass instance to JSON dictionary."""
-        return {
-            "request_id": trace.request_id,
-            "document_id": trace.document_id,
-            "original_query": trace.original_query,
-            "rewritten_query": trace.rewritten_query,
-            "query_intent": trace.query_intent,
-            "retrieval_strategy": trace.retrieval_strategy,
-            "multi_queries": trace.multi_queries,
-            "retrieved_chunks": trace.retrieved_chunks,
-            "context_sent_to_llm": trace.context_sent_to_llm[:300] + "...",
-            "raw_llm_response": trace.raw_llm_response[:200],
-            "parsed_response": trace.parsed_response,
-            "answer_relevance": trace.answer_relevance,
-            "groundedness": trace.groundedness,
-            "citation_valid": trace.citation_valid,
-            "confidence_score": trace.confidence_score,
-            "execution_time_ms": trace.execution_time_ms,
-            "cache_hit": trace.cache_hit,
-            "failure_stage": trace.failure_stage,
-            "failure_reason": trace.failure_reason,
-            "context_recall": trace.context_recall,
-            "answer_faithfulness": trace.answer_faithfulness,
-            "citation_correctness": trace.citation_correctness,
-            "response_latency_ms": trace.response_latency_ms
-        }
+# Instantiated Default Pipeline Instance
+default_rag_pipeline = RAGPipeline()
