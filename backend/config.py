@@ -70,6 +70,10 @@ HISTORY_DB_PATH = DATA_DIR / "chat_history.db"
 CLOUDFLARE_ACCOUNT_ID = get_clean_env("CLOUDFLARE_ACCOUNT_ID")
 CLOUDFLARE_API_TOKEN = get_clean_env("CLOUDFLARE_API_TOKEN")
 
+# Local OpenAI-Compatible LLM Settings (e.g. LM Studio, Ollama)
+LOCAL_LLM_BASE_URL = get_clean_env("LOCAL_LLM_BASE_URL")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "")
+
 # Models
 CLOUDFLARE_EMBEDDING_MODEL = os.getenv("CLOUDFLARE_EMBEDDING_MODEL", "@cf/baai/bge-large-en-v1.5")
 CLOUDFLARE_LLM_MODEL = os.getenv("CLOUDFLARE_LLM_MODEL", "@cf/meta/llama-3.1-8b-instruct")

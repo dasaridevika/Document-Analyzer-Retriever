@@ -26,6 +26,8 @@ from backend.config import (
     CLOUDFLARE_ACCOUNT_ID,
     CLOUDFLARE_API_TOKEN,
     CLOUDFLARE_LLM_MODEL,
+    LOCAL_LLM_BASE_URL,
+    LOCAL_LLM_MODEL,
     IMMUTABLE_SYSTEM_PROMPT,
     MIN_RELEVANCE_SCORE,
     FINAL_CONTEXT_K,
@@ -1144,6 +1146,8 @@ class EnterpriseRAGPipeline:
         self.vector_store = vector_store
         self.account_id = CLOUDFLARE_ACCOUNT_ID
         self.api_token = CLOUDFLARE_API_TOKEN
+        self.local_llm_base_url = LOCAL_LLM_BASE_URL
+        self.local_llm_model = LOCAL_LLM_MODEL
         self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/meta/llama-3.1-8b-instruct"
         self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
@@ -1719,6 +1723,44 @@ class EnterpriseRAGPipeline:
             sanitized_style = re.sub(r'(ignore\s*previous\s*instructions|system\s*prompt|show\s*env|api_key|api_token|secret\s*key|password)', '', system_prompt, flags=re.IGNORECASE).strip()
             if sanitized_style:
                 combined_system = f"{combined_system}\n\nUSER STYLE PROMPT: {sanitized_style}"
+
+        # 0. Try Local OpenAI-Compatible LLM (e.g. LM Studio, Ollama)
+        if self.local_llm_base_url:
+            try:
+                url = f"{self.local_llm_base_url.rstrip('/')}/chat/completions"
+                headers = {"Content-Type": "application/json"}
+                messages = [
+                    {"role": "system", "content": combined_system},
+                    {"role": "user", "content": query}
+                ]
+                payload = {
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": 3000
+                }
+                if self.local_llm_model:
+                    payload["model"] = self.local_llm_model
+
+                logger.info(f"Attempting local LLM call at {url}...")
+                resp = requests.post(url, headers=headers, json=payload, timeout=8)
+                if resp.status_code == 200:
+                    resp_json = resp.json()
+                    choices = resp_json.get("choices", [])
+                    if choices:
+                        choice = choices[0]
+                        response_text = choice.get("message", {}).get("content", "").strip()
+                        if response_text:
+                            parsed = _extract_json_payload(response_text)
+                            if parsed:
+                                return response_text, parsed
+                            return response_text, {
+                                "answerable": True,
+                                "answer": response_text,
+                                "parts": [],
+                                "confidence": 0.95
+                            }
+            except Exception as e:
+                logger.warning(f"Local LLM call failed or timed out: {e}")
 
         # 1. Try Cloudflare Worker AI Base URL
         if self.worker_base_url:
