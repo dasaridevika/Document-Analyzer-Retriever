@@ -1070,6 +1070,25 @@ class GroundedCitationVerifier:
                 final_score = overlap_score + intent_bonus
                 extracted_items.append((page_num, cid, s_clean, final_score))
 
+        # Small document optimization fallback: if we found very few matches (<= 1) and it's a short document (<= 12 chunks),
+        # return all clean sentences from the document to ensure the user gets complete information.
+        if len(extracted_items) <= 1 and len(target_chunks) <= 12:
+            extracted_items = []
+            seen_quotes.clear()
+            for c in target_chunks:
+                page_num = c["metadata"].get("page_number", 1)
+                cid = c["chunk_id"]
+                raw_text = c.get("raw_content", c["text"])
+                clean_text = re.sub(r'^Document:.*?\n\nContent:\n', '', raw_text, flags=re.DOTALL).strip()
+                unwrapped = re.sub(r'(?<![.!?:\n])\n(?![A-Z\•\*\-\d\.])', ' ', clean_text)
+                unwrapped = re.sub(r'\s+', ' ', unwrapped)
+                for s in re.split(r'(?<=[.!?])\s+', unwrapped):
+                    s_clean = s.strip()
+                    if s_clean in seen_quotes or not GroundedCitationVerifier._is_clean_sentence(s_clean):
+                        continue
+                    seen_quotes.add(s_clean)
+                    extracted_items.append((page_num, cid, s_clean, 0.5))
+
         # Sort extracted items: chronologically for summary/overview, otherwise by overlap score descending
         if intent in ["summary", "unknown"]:
             extracted_items.sort(key=lambda x: (x[0], x[1]))
@@ -1133,7 +1152,8 @@ class GroundedCitationVerifier:
                 "confidence": 0.0
             }, True, "No evidence fallback"
 
-        final_md = "## Answer\n\n" + "\n\n".join(md_output_parts)
+        warning_prefix = "*(Generative LLM is currently offline or quota-limited. Showing direct document facts below)*\n\n"
+        final_md = "## Answer\n\n" + warning_prefix + "\n\n".join(md_output_parts)
         if evidence_items:
             final_md += "\n\n## Evidence\n\n" + "\n".join(evidence_items[:4])
 
