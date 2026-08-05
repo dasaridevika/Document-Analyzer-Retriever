@@ -1453,9 +1453,14 @@ class EnterpriseRAGPipeline:
         if not all_candidate_chunks and filename:
             all_candidate_chunks = self.retrieve_document(filename=filename, document_id=document_id, max_pages=5)
 
-        # Safeguard: always append the first 2 chunks of the document (typically introduction/profile/header/skills)
-        # to guarantee the LLM has general grounding context for abstract or offline fallback queries.
-        if document_id and self.vector_store.ids_store:
+        # Safeguard: append the first 2 chunks of the document (typically introduction/profile/header/skills/abstract)
+        # ONLY when retrieval confidence is low (e.g., empty candidate retrieval or top similarity score < 0.25)
+        # to guarantee grounding context for abstract or offline fallback queries without diluting precise matches.
+        is_low_confidence = (
+            not all_candidate_chunks or 
+            max((c.get("similarity_score", 0.0) for c in all_candidate_chunks), default=0.0) < 0.25
+        )
+        if is_low_confidence and document_id and self.vector_store.ids_store:
             doc_indices = self.vector_store._doc_id_to_indices.get(document_id, [])
             if doc_indices:
                 seen_cids = {c["chunk_id"] for c in all_candidate_chunks}
