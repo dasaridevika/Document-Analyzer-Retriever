@@ -92,6 +92,15 @@ class TestProductionRAGPipeline(unittest.TestCase):
                             "confidence_score": 0.0
                         }
                     }
+            elif "hypothetical" in query or "hypothetical" in user_msg:
+                response_data = {
+                    "result": {
+                        "overview": "Hypothetical snippet",
+                        "detailed_explanation": "This candidate is suitable for a Senior Systems Engineer role working on HVDC transmission systems.",
+                        "citations": [],
+                        "confidence_score": 0.95
+                    }
+                }
             else:
                 response_data = {
                     "result": {

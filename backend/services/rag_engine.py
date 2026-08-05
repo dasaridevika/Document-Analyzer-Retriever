@@ -1533,16 +1533,28 @@ class EnterpriseRAGPipeline:
 
 
 
+    def _generate_hyde_query(self, query: str) -> str:
+        """Generates a hypothetical document snippet to improve vector matching (HyDE)."""
+        prompt = f"Write a hypothetical brief paragraph from a document/resume that answers this query: '{query}'"
+        sys_prompt = "You are a precise technical writer. Generate a single, concise hypothetical answer paragraph."
+        try:
+            raw, payload = self._execute_llm_call(
+                context="",
+                query=prompt,
+                system_prompt=sys_prompt,
+                temperature=0.7
+            )
+            if payload and payload.get("answer"):
+                return payload["answer"]
+        except Exception as e:
+            logger.warning(f"HyDE generation failed, using original query: {e}")
+        return query
+
     def _retrieve_chunks_for_query(
         self, sub_q: str, intent_type: str, top_k: int,
         filename: Optional[str], document_id: Optional[str], session_id: Optional[str], user_id: Optional[str]
     ) -> List[Dict[str, Any]]:
         """Retrieves and merges dense & sparse ranks using reciprocal_rank_fusion."""
-        q_embeddings = self.embedding_service.generate_embeddings([sub_q])
-        if not q_embeddings:
-            return []
-        query_embedding = q_embeddings[0]
-
         vector_store = self.vector_store
         if not vector_store.ids_store or vector_store.vector_matrix is None:
             return []
@@ -1562,12 +1574,16 @@ class EnterpriseRAGPipeline:
         if not candidate_indices:
             return []
 
-        # Broad / Analytical query detection (e.g. "what role suits me")
-        broad_triggers = ["role", "suit", "summarize", "overview", "who is", "evaluate", "strength", "where is"]
-        is_broad = any(trigger in sub_q.lower() for trigger in broad_triggers)
+        # Broad / Analytical query detection
+        abstract_triggers = [
+            "role", "suit", "summarize", "summary", "overview", "who is",
+            "evaluate", "strength", "weakness", "improve", "analyse", "analyze",
+            "opinion", "suggestion", "recommend", "fit", "rate", "review", "where is"
+        ]
+        is_broad = any(trigger in sub_q.lower() for trigger in abstract_triggers) or len(sub_q.split()) <= 3
 
         # Broad query optimization or small document bypass: return everything sorted by page number
-        if is_broad or len(candidate_indices) <= 12:
+        if len(candidate_indices) <= 12:
             all_chunks = []
             for idx in candidate_indices:
                 all_chunks.append({
@@ -1579,6 +1595,17 @@ class EnterpriseRAGPipeline:
                 })
             all_chunks.sort(key=lambda x: x["metadata"].get("page_number", 0))
             return all_chunks[:top_k]
+
+        # For large documents: if it's an abstract query, use HyDE (Hypothetical Document Embeddings) to improve matching
+        search_query = sub_q
+        if is_broad:
+            search_query = self._generate_hyde_query(sub_q)
+            logger.info(f"HyDE query generated: {search_query}")
+
+        q_embeddings = self.embedding_service.generate_embeddings([search_query])
+        if not q_embeddings:
+            return []
+        query_embedding = q_embeddings[0]
 
         # 1. Dense Cosine Similarity Ranks
         sub_matrix = vector_store.vector_matrix[candidate_indices]

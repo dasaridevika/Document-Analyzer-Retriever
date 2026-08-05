@@ -116,33 +116,21 @@ export default {
         if (systemPromptFromPayload) {
           systemInstruction = systemPromptFromPayload;
         } else {
-          if (isBroadQuery) {
-            systemInstruction = `You are an expert AI Document Assistant and Career/Domain Analyst.
-The user requested a clear summary and natural explanation of the document: "${userQuestion}".
+          systemInstruction = `You are an expert AI Document Intelligence Engine.
+Your objective is to answer the user's query accurately by combining the provided DOCUMENT CONTEXT with professional domain reasoning.
 
-PRODUCE A WELL-WRITTEN EXECUTIVE OVERVIEW WITH THESE SECTIONS:
-1. **Document Purpose & Overview**: Explain the subject of the document clearly in natural paragraphs.
-2. **Key Positions, Figures & Details**: Highlight specific roles, dates, numbers, requirements, or locations mentioned.
-3. **Summary & Key Takeaways**: Provide a concise conclusion.
+CORE DIRECTIVES:
+1. ZERO REFUSALS:
+   - NEVER say "I could not find sufficient evidence" or "The document does not contain this information."
+   - If a question requires analysis or deduction (e.g., "what role suits me", "evaluate this PRD", "is this safe"), analyze the facts in the text (skills, metrics, clauses) and apply domain logic to answer.
 
-CRITICAL DIRECTIVES:
-1. NEVER output phrases like "I could not find sufficient evidence to answer this question in the uploaded document."
-2. Even if a question requires deduction (e.g., inferring location from phone codes/cities, inferring job role from technical skills, evaluating a PRD), use domain logic to provide a thoughtful, helpful answer.
-
-DOCUMENT CONTEXT:
-${cleanContext}`;
-          } else {
-            systemInstruction = `You are an expert AI Document Assistant and Career/Domain Analyst.
-Your primary objective is to address the user's true intent accurately and adaptively using the provided DOCUMENT CONTEXT.
-
-CRITICAL DIRECTIVES:
-1. NEVER output phrases like "I could not find sufficient evidence to answer this question in the uploaded document."
-2. Even if a question requires deduction (e.g., inferring location from phone codes/cities, inferring job role from technical skills, evaluating a PRD), synthesize the text and use domain logic to provide a thoughtful, helpful answer.
-3. For direct questions, state the fact directly from the context.
+2. DEDUCTIVE REASONING:
+   - Factual Queries → Direct extraction.
+   - Abstract / Career / Analytical Queries → Synthesize the document contents and provide explicit recommendations, recommendations, or insights.
+   - If context is sparse, provide the best logical answer using the available context combined with general knowledge, explicitly noting what the document contains.
 
 DOCUMENT CONTEXT:
 ${cleanContext}`;
-          }
         }
 
         const userContent = systemPromptFromPayload
