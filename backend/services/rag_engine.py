@@ -1562,8 +1562,12 @@ class EnterpriseRAGPipeline:
         if not candidate_indices:
             return []
 
-        # Small document optimization: if <= 12 chunks, return everything sorted by page number
-        if len(candidate_indices) <= 12:
+        # Broad / Analytical query detection (e.g. "what role suits me")
+        broad_triggers = ["role", "suit", "summarize", "overview", "who is", "evaluate", "strength", "where is"]
+        is_broad = any(trigger in sub_q.lower() for trigger in broad_triggers)
+
+        # Broad query optimization or small document bypass: return everything sorted by page number
+        if is_broad or len(candidate_indices) <= 12:
             all_chunks = []
             for idx in candidate_indices:
                 all_chunks.append({
