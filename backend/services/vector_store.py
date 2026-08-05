@@ -116,7 +116,6 @@ def maximum_marginal_relevance(
     if len(doc_vectors) == 0:
         return []
 
-    # Relevance to query
     relevance = np.dot(doc_vectors, query_vector.T).flatten()
     selected_indices: List[int] = []
     unselected_indices = list(range(len(doc_vectors)))
@@ -149,7 +148,8 @@ def maximum_marginal_relevance(
 
 class VectorStoreManager:
     """
-    Production-Grade Vector Store Engine with Hybrid Search, MMR Reranking & Jaccard Deduplication.
+    Production-Grade Vector Store Engine with Intent-Driven Adaptive Hybrid Search,
+    MMR Diversity Reranking & Jaccard Deduplication.
     """
 
     def __init__(self, embedding_dim: int = 1024, embedding_model: str = "@cf/baai/bge-large-en-v1.5"):
@@ -204,7 +204,6 @@ class VectorStoreManager:
                     if bm25_state:
                         self.bm25_index.load_state(bm25_state)
                     else:
-                        # Rebuild if missing
                         for i, doc in enumerate(self.documents_store):
                             self.bm25_index.add_document(self.ids_store[i], doc)
 
@@ -331,25 +330,51 @@ class VectorStoreManager:
         self,
         query_embedding: List[float],
         raw_query: str = "",
-        intent_type: str = "fact",
-        top_k: int = 12,
+        intent_type: str = "qa",
+        top_k: Optional[int] = None,
         filename_filter: str = None,
         document_id_filter: str = None,
         session_id_filter: str = None,
         user_id_filter: str = None,
         min_score: float = 0.15,
-        use_mmr: bool = True
+        use_mmr: Optional[bool] = None
     ) -> List[Dict[str, Any]]:
+        """
+        Intent-Driven Hybrid Search Pipeline.
+        Dynamically adjusts top_k, BM25 weighting, and MMR diversity parameters based on task intent.
+        """
         if not self.ids_store or self.vector_matrix is None:
             return []
 
+        # --- STEP 1: Intent Parameter Normalization ---
+        intent_type = (intent_type or "qa").lower().strip()
+        
+        # Intent-driven defaults for top_k and MMR
+        intent_top_k_map = {
+            "extract_fields": 3,
+            "qa": 5,
+            "list_items": 8,
+            "action_items": 8,
+            "compare": 10,
+            "rewrite": 5,
+            "summary": 15,
+            "review": 15,
+        }
+        effective_top_k = top_k if top_k is not None else intent_top_k_map.get(intent_type, 8)
+        
+        # Disable MMR for exact field extraction to prevent losing exact matches
+        if use_mmr is None:
+            effective_use_mmr = False if intent_type in ["extract_fields", "rewrite"] else True
+        else:
+            effective_use_mmr = use_mmr
+
+        # --- STEP 2: Vector Normalization & Filtering ---
         norm_query = self._normalize_vectors([query_embedding])
 
         if norm_query.shape[1] != self.vector_matrix.shape[1]:
             logger.warning(f"Embedding dimension mismatch: Query ({norm_query.shape[1]}) vs Store ({self.vector_matrix.shape[1]})")
             return []
 
-        # Inverted index lookup for O(1) metadata filtering
         candidates = set(range(len(self.ids_store)))
         
         if document_id_filter:
@@ -369,11 +394,11 @@ class VectorStoreManager:
         sub_matrix = self.vector_matrix[candidate_indices]
         sub_docs = [self.documents_store[i] for i in candidate_indices]
 
-        # 1. Dense Cosine Similarity
+        # --- STEP 3: Dense Cosine Similarity ---
         dense_sims = np.dot(sub_matrix, norm_query.T).flatten()
         dense_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(dense_sims)[::-1])}
 
-        # 2. Lexical BM25 Search (Using Persisted Global TF/DF Statistics)
+        # --- STEP 4: Lexical BM25 Search ---
         bm25_rank_map = {}
         if raw_query.strip() and candidate_indices:
             candidate_ids = [self.ids_store[i] for i in candidate_indices]
@@ -381,39 +406,51 @@ class VectorStoreManager:
             bm25_scores = np.array([bm25_scores_dict.get(self.ids_store[i], 0.0) for i in candidate_indices], dtype=np.float32)
             bm25_rank_map = {loc_idx: rank for rank, loc_idx in enumerate(np.argsort(bm25_scores)[::-1])}
 
-        # 3. Intent-Driven RRF Scoring
+        # --- STEP 5: Intent-Driven Reciprocal Rank Fusion (RRF) ---
         rrf_scores = []
         k_rrf = 60
+        
+        # Adjust weight ratios based on task intent
+        if intent_type in ["extract_fields", "list_items"]:
+            dense_weight, bm25_weight = 0.4, 0.6  # Boost exact keyword matches
+        elif intent_type in ["summary", "review"]:
+            dense_weight, bm25_weight = 0.8, 0.2  # Boost dense semantic concepts
+        else:
+            dense_weight, bm25_weight = 0.5, 0.5  # Balanced RRF
+
         for loc_idx in range(len(candidate_indices)):
             d_rank = dense_rank_map.get(loc_idx, 999)
             b_rank = bm25_rank_map.get(loc_idx, 999)
-            rrf = (1.0 / (k_rrf + d_rank)) + (1.0 / (k_rrf + b_rank))
+            
+            rrf = (dense_weight / (k_rrf + d_rank)) + (bm25_weight / (k_rrf + b_rank))
 
             doc_text_lower = sub_docs[loc_idx].lower()
             
-            # Generalized query overlap density (de-biased)
+            # Generalized query overlap density
             doc_words = set(re.findall(r'\w+', doc_text_lower))
             query_words = set(re.findall(r'\w+', raw_query.lower())) - {
                 "what", "is", "the", "how", "to", "in", "of", "for", "a", "an", "and", "or", "are", "about", "explain"
             }
             overlap = len(query_words & doc_words) / max(1, len(query_words)) if query_words else 0.0
             
-            # Scale intent bonus proportionally
             intent_bonus = overlap * 0.05
-
             final_rerank_score = rrf + intent_bonus
             rrf_scores.append((final_rerank_score, loc_idx, dense_sims[loc_idx]))
 
         rrf_scores.sort(key=lambda x: x[0], reverse=True)
 
-        # 4. Optional Maximum Marginal Relevance (MMR) Reranking for Diversity
-        if use_mmr and len(rrf_scores) > top_k:
-            candidate_vecs = np.array([sub_matrix[loc_idx] for _, loc_idx, _ in rrf_scores[:top_k * 2]])
-            mmr_sel = maximum_marginal_relevance(norm_query[0], candidate_vecs, lambda_param=0.75, top_k=top_k)
+        # --- STEP 6: Task-Aware MMR Diversity Reranking ---
+        if effective_use_mmr and len(rrf_scores) > effective_top_k:
+            candidate_vecs = np.array([sub_matrix[loc_idx] for _, loc_idx, _ in rrf_scores[:effective_top_k * 2]])
+            
+            # Adjust MMR lambda based on intent (higher = more relevance, lower = more diversity)
+            mmr_lambda = 0.85 if intent_type in ["qa", "compare"] else 0.65
+            mmr_sel = maximum_marginal_relevance(norm_query[0], candidate_vecs, lambda_param=mmr_lambda, top_k=effective_top_k)
             final_ordered = [rrf_scores[idx] for idx in mmr_sel]
         else:
-            final_ordered = rrf_scores[:top_k]
+            final_ordered = rrf_scores[:effective_top_k]
 
+        # --- STEP 7: Deduplication & Page Constraint Assembly ---
         retrieved_chunks = []
         page_counts: Dict[int, int] = {}
         selected_texts = []
@@ -445,7 +482,7 @@ class VectorStoreManager:
                 "distance": round(float(1.0 - d_score), 4)
             })
 
-            if len(retrieved_chunks) >= top_k:
+            if len(retrieved_chunks) >= effective_top_k:
                 break
 
         return retrieved_chunks
