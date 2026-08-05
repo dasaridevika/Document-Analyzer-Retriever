@@ -1951,6 +1951,8 @@ class EnterpriseRAGPipeline:
         if self.account_id and self.api_token and "placeholder" not in self.account_id:
             models_to_try = [
                 self.llm_model,
+                "@cf/meta/llama-3.1-8b-instruct-fp8",
+                "@cf/meta/llama-3.2-3b-instruct",
                 "@cf/meta/llama-3.1-70b-instruct",
                 "@cf/meta/llama-3-8b-instruct",
                 "@cf/mistral/mistral-7b-instruct-v0.1"
