@@ -60,22 +60,22 @@ class TestRAGPipelineAudit(unittest.TestCase):
         chunks = self.chunker.create_chunks(hvdc_pages, filename="hvdc.pdf", document_id="doc_hvdc")
         self.vector_store.add_chunks(chunks, self.embed_service.generate_embeddings([c["text"] for c in chunks]))
 
-        # 1. Query 1: Definition
-        res_def = self.rag.answer_query("What is shunt compensation?", filename="hvdc.pdf", document_id="doc_hvdc")
-        # 2. Query 2: Objectives
+        # 1. Query 1: Extract Fields
+        res_def = self.rag.answer_query("Extract fields and definition for shunt compensation", filename="hvdc.pdf", document_id="doc_hvdc")
+        # 2. Query 2: List Items (Objectives)
         res_obj = self.rag.answer_query("What are the objectives of shunt compensation?", filename="hvdc.pdf", document_id="doc_hvdc")
-        # 3. Query 3: Mechanism / Voltage Stability
-        res_mech = self.rag.answer_query("How does shunt compensation improve voltage stability?", filename="hvdc.pdf", document_id="doc_hvdc")
+        # 3. Query 3: Review / Mechanism
+        res_mech = self.rag.answer_query("Provide a review of shunt compensation and how it improves voltage stability", filename="hvdc.pdf", document_id="doc_hvdc")
 
         # Verify QueryIntents in Debug Traces
-        self.assertEqual(res_def["rag_trace"]["query_intent"], "definition")
-        self.assertEqual(res_obj["rag_trace"]["query_intent"], "objectives")
-        self.assertEqual(res_mech["rag_trace"]["query_intent"], "mechanism")
+        self.assertEqual(res_def["rag_trace"]["query_intent"], "extract_fields")
+        self.assertEqual(res_obj["rag_trace"]["query_intent"], "list_items")
+        self.assertEqual(res_mech["rag_trace"]["query_intent"], "review")
 
         # Verify Answers are Materially Different
-        self.assertIn("Definition", res_def["answer"])
-        self.assertIn("Key Objectives", res_obj["answer"])
-        self.assertIn("Voltage Stability & Control Mechanism", res_mech["answer"])
+        self.assertIn("Extracted Fact", res_def["answer"])
+        self.assertIn("Key Items/Action Items", res_obj["answer"])
+        self.assertIn("Analysis", res_mech["answer"])
 
         self.assertNotEqual(res_def["answer"], res_obj["answer"])
         self.assertNotEqual(res_def["answer"], res_mech["answer"])
@@ -289,7 +289,7 @@ class TestRAGPipelineAudit(unittest.TestCase):
         ]
         resolved, intent_obj = QueryRewriter.rewrite_query("objectives of shunt compensation", chat_history)
         self.assertEqual(resolved, "objectives of shunt compensation")
-        self.assertEqual(intent_obj.intent, "objectives")
+        self.assertEqual(intent_obj.intent, "list_items")
 
     def test_13_hierarchical_parent_child_retrieval(self):
         pages = [

@@ -44,14 +44,47 @@ logger = logging.getLogger(__name__)
 @dataclass
 class QueryIntent:
     """Represents classified query intent, subjects, and execution parameters."""
-    intent: str  # definition, summary, overview, comparison, explanation, list, objectives, page_lookup, chapter_lookup, reasoning, table_lookup, figure_lookup, calculation, boolean, multi_hop
-    primary_subject: str
+    intent: str  # summary, review, list_items, extract_fields, qa, compare, rewrite, action_items, unknown
+    reason: str
+    retrieval_mode: str  # broad, hybrid, focused, sectional
+    response_format: str  # prose, bullets, table, json
+    broad_coverage: bool
+    exact_extraction: bool
+    section_specific: bool
+    targets: List[str]
+    rewritten_query: str
+    confidence: float
+    ambiguity: bool
+    clarification_needed: bool
+    clarification_question: str
+    primary_subject: str = ""
     secondary_subject: Optional[str] = None
-    requested_format: str = "direct answer"
     target_page: Optional[int] = None
     target_chapter: Optional[int] = None
-    adaptive_top_k: int = 5
-    retrieval_strategy: str = "dense_hybrid"  # map_reduce, multi_hop, page_filter, chapter_filter, wide_dense, dense_hybrid
+
+    @property
+    def retrieval_strategy(self) -> str:
+        if self.retrieval_mode == "broad":
+            return "map_reduce"
+        elif self.retrieval_mode == "sectional":
+            return "multi_hop"
+        elif self.target_page:
+            return "page_filter"
+        elif self.target_chapter:
+            return "chapter_filter"
+        else:
+            return "dense_hybrid"
+
+    @property
+    def adaptive_top_k(self) -> int:
+        if self.retrieval_mode == "broad":
+            return 15
+        elif self.retrieval_mode == "hybrid":
+            return 10
+        elif self.retrieval_mode == "sectional":
+            return 8
+        else:
+            return 5
 
 
 @dataclass
@@ -401,106 +434,147 @@ class QueryRewriter:
         resolved_q = ConversationResolver.resolve_conversation(query, chat_history)
         lower_q = resolved_q.lower().strip("?!., ")
 
-        # Target Page & Chapter Lookups
+        # Target Page & Chapter Lookups (preserved for backward compatibility helper routing)
         page_match = re.search(r'\bpage\s+(\d+)\b', lower_q)
         chapter_match = re.search(r'\bchapter\s+(\d+)\b', lower_q)
-
         target_page = int(page_match.group(1)) if page_match else None
         target_chapter = int(chapter_match.group(1)) if chapter_match else None
 
-        # Comparison Extraction ("difference between X and Y", "compare X and Y")
-        comp_match = re.search(r'(?:difference between|compare|versus|vs)\s+([\w\s]+?)\s+(?:and|vs|versus)\s+([\w\s]+)', lower_q)
+        # 1. Detect Intent
+        intent = "qa"
+        reason = "Direct factual query matching the question-answering intent."
+        retrieval_mode = "focused"
+        response_format = "prose"
+        broad_coverage = False
+        exact_extraction = False
+        section_specific = False
+        targets = ["factual answer"]
 
-        intent = "fact"
-        requested_format = "direct answer"
-        adaptive_top_k = 5
-        strategy = "dense_hybrid"
-        primary_subj = ""
-        secondary_subj = None
+        # Check rules in priority order
+        if any(w in lower_q for w in ["insight", "analysis", "review", "strength", "weakness", "risk", "gap", "concern", "recommendation"]):
+            intent = "review"
+            reason = "User requested high-level analysis, insights, risk evaluation, or recommendations."
+            retrieval_mode = "broad"
+            response_format = "prose"
+            broad_coverage = True
+            targets = ["insights", "analysis", "observations", "risks", "gaps", "strengths", "weaknesses", "recommendations"]
 
-        if comp_match:
-            intent = "comparison"
-            primary_subj = comp_match.group(1).strip()
-            secondary_subj = comp_match.group(2).strip()
-            requested_format = "structured concept comparison"
-            adaptive_top_k = 8
-            strategy = "multi_hop"
-
-        elif any(w in lower_q for w in ["summarize", "summarise", "summary", "summarisation", "overview", "what is this pdf about", "main points"]):
+        elif any(w in lower_q for w in ["summarize", "summarise", "summary", "overview", "what is this pdf about", "main points"]):
             intent = "summary"
-            primary_subj = "document overview"
-            requested_format = "document executive summary"
-            adaptive_top_k = 15
-            strategy = "map_reduce"
+            reason = "User requested a concise summary or general overview of the document contents."
+            retrieval_mode = "broad"
+            response_format = "prose"
+            broad_coverage = True
+            targets = ["summary", "overview", "main points", "executive summary"]
 
-        elif target_page is not None:
-            intent = "page_lookup"
-            primary_subj = f"page {target_page}"
-            requested_format = "page content summary"
-            adaptive_top_k = 3
-            strategy = "page_filter"
+        elif any(w in lower_q for w in ["list", "enumerate", "show all", "provide bullets", "collect items", "bullet points", "clause", "obligation", "requirement", "key point", "items", "enumeration", "objective", "objectives", "purpose"]):
+            intent = "list_items"
+            reason = "User wants key points, bullet lists, clauses, obligations, or requirement items extracted."
+            retrieval_mode = "hybrid"
+            response_format = "bullets"
+            exact_extraction = True
+            targets = ["key points", "bulleted items", "obligations", "requirements", "clauses"]
 
-        elif target_chapter is not None:
-            intent = "chapter_lookup"
-            primary_subj = f"chapter {target_chapter}"
-            requested_format = "chapter overview"
-            adaptive_top_k = 6
-            strategy = "chapter_filter"
+        elif any(w in lower_q for w in ["extract", "find names", "find dates", "invoice number", "total", "monetary amount", "entity", "labeled field", "clause", "risk"]):
+            intent = "extract_fields"
+            reason = "User requested structured entities, exact dates, names, invoice numbers, or monetary values."
+            retrieval_mode = "hybrid"
+            response_format = "json"
+            exact_extraction = True
+            targets = ["entities", "names", "dates", "monetary amounts", "IDs", "invoice numbers", "totals"]
 
-        elif any(w in lower_q for w in ["what is", "define", "definition", "meaning of"]):
-            intent = "definition"
-            primary_subj = re.sub(r'^(what is|define|definition|meaning of)\s*', '', lower_q).strip()
-            requested_format = "short definition with explanation"
-            adaptive_top_k = 3
-            strategy = "dense_hybrid"
+        elif any(w in lower_q for w in ["difference", "similarity", "versus", "vs", "compare", "similarities"]):
+            intent = "compare"
+            reason = "User requested a comparison of differences, similarities, or versions."
+            retrieval_mode = "sectional"
+            response_format = "table"
+            section_specific = True
+            targets = ["comparison", "differences", "similarities"]
 
-        elif any(w in lower_q for w in ["objective", "objectives", "purpose of", "aim of"]):
-            intent = "objectives"
-            primary_subj = re.sub(r'^(what are the objectives of|purpose of|aim of)\s*', '', lower_q).strip()
-            requested_format = "bulleted objectives list"
-            adaptive_top_k = 4
-            strategy = "dense_hybrid"
+        elif any(w in lower_q for w in ["todo", "to-do", "action item", "deadline", "deliverable", "next step", "what needs to be done", "obligation", "tasks"]):
+            intent = "action_items"
+            reason = "User requested obligations, deadlines, next steps, or project deliverables."
+            retrieval_mode = "hybrid"
+            response_format = "bullets"
+            exact_extraction = True
+            targets = ["tasks", "deadlines", "action items", "deliverables"]
 
-        elif any(w in lower_q for w in ["how does", "how do", "improve", "mechanism", "work"]):
-            intent = "mechanism"
-            primary_subj = re.sub(r'^(how does|how do|mechanism of)\s*', '', lower_q).strip()
-            requested_format = "step-by-step mechanism explanation"
-            adaptive_top_k = 5
-            strategy = "dense_hybrid"
+        elif any(w in lower_q for w in ["simplify", "rephrase", "rewrite", "clean", "translate", "paraphrase"]):
+            intent = "rewrite"
+            reason = "User requested rephrased, simplified, or translated text representation."
+            retrieval_mode = "broad"
+            response_format = "prose"
+            broad_coverage = True
+            targets = ["rewritten text", "simplified content", "rephrasing"]
 
-        elif any(w in lower_q for w in ["explain", "elaborate", "details"]):
-            intent = "explanation"
-            primary_subj = re.sub(r'^(explain|elaborate|details on)\s*', '', lower_q).strip()
-            requested_format = "detailed conceptual explanation"
-            adaptive_top_k = 6
-            strategy = "dense_hybrid"
+        elif len(lower_q.split()) <= 1 or lower_q in ["test", "hello", "hi", "help"]:
+            intent = "unknown"
+            reason = "The query has unclear or unsupported intent characteristics."
+            retrieval_mode = "focused"
+            response_format = "prose"
+            targets = []
 
-        elif any(w in lower_q for w in ["list", "subjects", "courses", "all", "advantages", "disadvantages"]):
-            intent = "list"
-            primary_subj = re.sub(r'^(list|all|advantages|disadvantages)\s*', '', lower_q).strip()
-            requested_format = "structured list"
-            adaptive_top_k = 10
-            strategy = "wide_dense"
+        # 2. Check Ambiguity and Clarification triggers
+        ambiguity = False
+        clarification_needed = False
+        clarification_question = ""
 
-        elif any(w in lower_q for w in ["why", "reason", "because", "cause"]):
-            intent = "reasoning"
-            primary_subj = re.sub(r'^(why|reason for)\s*', '', lower_q).strip()
-            requested_format = "cause and effect reasoning"
-            adaptive_top_k = 8
-            strategy = "multi_hop"
+        if "list it" in lower_q or (re.search(r'\blist\b', lower_q) and not any(x in lower_q for x in ["points", "items", "terms", "clauses", "dates", "names", "numbers", "obligations", "requirements", "details", "everything", "facts"])):
+            ambiguity = True
+            clarification_needed = True
+            clarification_question = "What specifically would you like me to list from the document?"
 
-        if not primary_subj:
-            primary_subj = lower_q
+        elif "compare" in lower_q and not any(x in lower_q for x in ["sections", "terms", "concepts", "clauses", "versions", "and", "vs", "versus"]):
+            ambiguity = True
+            clarification_needed = True
+            clarification_question = "What specific sections, terms, or versions would you like me to compare?"
+
+        elif "extract" in lower_q and not any(x in lower_q for x in ["names", "dates", "invoices", "totals", "clauses", "risks", "items", "fields"]):
+            ambiguity = True
+            clarification_needed = True
+            clarification_question = "Which specific fields (e.g., names, dates, amounts) would you like me to extract?"
+
+        elif intent == "unknown":
+            ambiguity = True
+            clarification_needed = True
+            clarification_question = "Please provide more details on what you would like to analyze, extract, or ask about the document."
+
+        # 3. Formulate Search-Friendly Query
+        rewritten_query = lower_q
+        if intent == "summary":
+            rewritten_query = f"Executive summary, main topics, and overview of the document contents for {lower_q}"
+        elif intent == "review":
+            rewritten_query = f"Detailed document analysis, observations, risks, strengths, weaknesses, and recommendations for {lower_q}"
+        elif intent == "list_items":
+            rewritten_query = f"List of key points, requirements, obligations, and clauses in {lower_q}"
+        elif intent == "extract_fields":
+            rewritten_query = f"Extraction of names, dates, amounts, invoice numbers, clauses, and structured entities in {lower_q}"
+        elif intent == "compare":
+            rewritten_query = f"Comparison of differences and similarities in {lower_q}"
+        elif intent == "action_items":
+            rewritten_query = f"Extraction of action items, deadlines, deliverables, obligations, and tasks in {lower_q}"
+        elif intent == "rewrite":
+            rewritten_query = f"Rephrased, simplified, and cleaned version of {lower_q}"
+
+        confidence = 0.0 if clarification_needed else 0.95
 
         intent_obj = QueryIntent(
             intent=intent,
-            primary_subject=primary_subj,
-            secondary_subject=secondary_subj,
-            requested_format=requested_format,
+            reason=reason,
+            retrieval_mode=retrieval_mode,
+            response_format=response_format,
+            broad_coverage=broad_coverage,
+            exact_extraction=exact_extraction,
+            section_specific=section_specific,
+            targets=targets,
+            rewritten_query=rewritten_query,
+            confidence=confidence,
+            ambiguity=ambiguity,
+            clarification_needed=clarification_needed,
+            clarification_question=clarification_question,
+            primary_subject=lower_q,
             target_page=target_page,
-            target_chapter=target_chapter,
-            adaptive_top_k=adaptive_top_k,
-            retrieval_strategy=strategy
+            target_chapter=target_chapter
         )
 
         return resolved_q, intent_obj
@@ -628,7 +702,7 @@ class GroundedCitationVerifier:
         answer_faithfulness = round(verified_claims / max(1, total_citations), 2) if total_citations > 0 else (1.0 if raw_answer or raw_definition else 0.0)
 
         # Synthesis/list intent relaxation rule: prevent fallback triggers on analytical requests
-        is_synthesis_query = intent_obj.intent in ["summary", "overview", "comparison", "list", "explanation"]
+        is_synthesis_query = intent_obj.intent in ["summary", "review", "list_items", "compare", "rewrite", "action_items"]
         if not valid_citations and is_synthesis_query:
             if correct_citations > 0 or total_citations == 0:
                 valid_citations = True
@@ -725,7 +799,7 @@ class GroundedCitationVerifier:
                 intent_bonus = 0.0
                 s_lower = s_clean.lower()
                 
-                if intent == "definition":
+                if intent == "extract_fields":
                     def_keywords = ["defined as", "refers to", "definition", "means", "is a", "is the", "constitutes", "stands for", "is used to", "changes the", "characterized by"]
                     if any(k in s_lower for k in def_keywords):
                         intent_bonus += 0.35
@@ -733,14 +807,14 @@ class GroundedCitationVerifier:
                     if words_list and words_list[0] in match_words:
                         intent_bonus += 0.15
                         
-                elif intent == "objectives":
-                    obj_keywords = ["objective", "purpose", "aim", "goal", "to increase", "to control", "to minimize", "to maintain", "target", "intended to", "applied to"]
+                elif intent in ["list_items", "action_items"]:
+                    obj_keywords = ["objective", "purpose", "aim", "goal", "to increase", "to control", "to minimize", "to maintain", "target", "intended to", "applied to", "todo", "action", "deadline", "task"]
                     if any(k in s_lower for k in obj_keywords):
                         intent_bonus += 0.35
                     if any(k in s_lower for k in ["defined as", "refers to"]):
                         intent_bonus -= 0.20
                         
-                elif intent in ["mechanism", "explanation"]:
+                elif intent in ["review", "rewrite", "qa"]:
                     mech_keywords = ["how", "process", "mechanism", "operation", "function", "works", "by", "through", "utilizes", "operates", "results in", "consequently"]
                     if any(k in s_lower for k in mech_keywords):
                         intent_bonus += 0.35
@@ -751,7 +825,7 @@ class GroundedCitationVerifier:
                 extracted_items.append((page_num, cid, s_clean, final_score))
 
         # Sort extracted items: chronologically for summary/overview, otherwise by overlap score descending
-        if intent in ["summary", "overview", "page_lookup", "chapter_lookup"]:
+        if intent in ["summary", "unknown"]:
             extracted_items.sort(key=lambda x: (x[0], x[1]))
         else:
             extracted_items.sort(key=lambda x: x[3], reverse=True)
@@ -762,45 +836,43 @@ class GroundedCitationVerifier:
         md_output_parts = []
         evidence_items = []
 
-        if intent in ["summary", "overview"]:
+        if intent == "summary":
             doc_title = target_chunks[0]["metadata"].get("filename", "Uploaded Document") if target_chunks else "Uploaded Document"
             bullets = [f"• {s}" for p, cid, s in extracted_items[:5]]
             evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:5]]
             if bullets:
                 md_output_parts.append(f"**Executive Summary of {doc_title}:**\n\n" + "\n\n".join(bullets))
 
-        elif intent == "definition":
+        elif intent == "extract_fields":
             if extracted_items:
                 p, cid, s = extracted_items[0]
-                md_output_parts.append(f"**Definition:**\n{s}")
+                md_output_parts.append(f"**Extracted Fact:**\n{s}")
                 evidence_items.append(f"- Page {p}, chunk {cid}: “{s[:120]}”")
                 if len(extracted_items) > 1:
                     p2, cid2, s2 = extracted_items[1]
-                    md_output_parts.append(f"**Explanation:**\n{s2}")
+                    md_output_parts.append(f"**Contextual Information:**\n{s2}")
                     evidence_items.append(f"- Page {p2}, chunk {cid2}: “{s2[:120]}”")
 
-        elif intent == "objectives":
+        elif intent in ["list_items", "action_items"]:
             bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
             evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
             if bullets:
                 subject_title = intent_obj.primary_subject.title() if intent_obj.primary_subject else ""
-                title_str = f"**Key Objectives of {subject_title}:**" if subject_title else "**Key Objectives:**"
+                title_str = f"**Key Items/Action Items for {subject_title}:**" if subject_title else "**Key Items/Action Items:**"
                 md_output_parts.append(title_str + "\n" + "\n".join(bullets))
 
-        elif intent in ["mechanism", "explanation"]:
+        elif intent in ["review", "rewrite", "qa"]:
             bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
             evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:4]]
             if bullets:
-                subject_title = intent_obj.primary_subject.title() if (intent_obj and intent_obj.primary_subject) else "Mechanism & Process"
-                if "voltage stability" in subject_title.lower() or "shunt" in subject_title.lower():
-                    subject_title = "Voltage Stability & Control"
-                md_output_parts.append(f"**{subject_title} Mechanism:**\n" + "\n\n".join(bullets))
+                subject_title = intent_obj.primary_subject.title() if (intent_obj and intent_obj.primary_subject) else "Overview"
+                md_output_parts.append(f"**{subject_title} Analysis:**\n" + "\n\n".join(bullets))
 
-        elif intent == "comparison":
+        elif intent == "compare":
             bullets = [f"• {s}" for p, cid, s in extracted_items[:6]]
             evidence_items = [f"- Page {p}, chunk {cid}: “{s[:120]}”" for p, cid, s in extracted_items[:6]]
             if bullets:
-                md_output_parts.append(f"**Comparative Overview of {intent_obj.primary_subject} and {intent_obj.secondary_subject or 'Related Concepts'}:**\n" + "\n".join(bullets))
+                md_output_parts.append(f"**Comparative Overview:**\n" + "\n".join(bullets))
 
         else:
             bullets = [f"• {s}" for p, cid, s in extracted_items[:4]]
