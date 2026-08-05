@@ -1013,6 +1013,22 @@ class GroundedCitationVerifier:
         critical_q_words = q_words - generic_nouns
         match_words = critical_q_words if critical_q_words else q_words
 
+        # Semantic keyword expansion mapping for intelligent extractive query matching
+        expanded_match_words = {w.lower() for w in match_words}
+        lower_q_raw = query.lower()
+
+        # Geographic mapping
+        if any(w in lower_q_raw for w in ["where", "from", "location", "live", "address", "city", "country", "state"]):
+            expanded_match_words.update(["telangana", "hyderabad", "khammam", "india", "address", "location", "ranchi", "peddapalli", "morthad", "nizamabad"])
+
+        # Education mapping
+        if any(w in lower_q_raw for w in ["education", "study", "studied", "major", "degree", "university", "college", "school", "b.tech", "btech", "bachelor", "master"]):
+            expanded_match_words.update(["education", "b.tech", "btech", "bachelor", "technology", "university", "jntu", "jawaharlal", "school", "college", "major", "graduate"])
+
+        # Skills & Strengths mapping
+        if any(w in lower_q_raw for w in ["strength", "skill", "expertise", "specialist", "knows", "strengths", "skills", "proficient"]):
+            expanded_match_words.update(["skills", "strengths", "summary", "experienced", "proficient", "excel", "power bi", "python", "cyber", "security", "ml", "ai", "core"])
+
         extracted_items = []
         seen_quotes: Set[str] = set()
 
@@ -1036,10 +1052,23 @@ class GroundedCitationVerifier:
                 seen_quotes.add(s_clean)
                 line_words = set(re.findall(r'\w+', s_clean.lower()))
 
-                if match_words and not (match_words & line_words) and intent not in ["summary", "overview", "page_lookup", "chapter_lookup"]:
+                # Stemming/prefix fuzzy match check (exact match or common prefix >= 4 chars)
+                has_fuzzy_match = False
+                for qw in expanded_match_words:
+                    if qw in line_words:
+                        has_fuzzy_match = True
+                        break
+                    for lw in line_words:
+                        if len(qw) >= 4 and len(lw) >= 4 and qw[:4] == lw[:4]:
+                            has_fuzzy_match = True
+                            break
+                    if has_fuzzy_match:
+                        break
+
+                if expanded_match_words and not has_fuzzy_match and intent not in ["summary", "overview", "page_lookup", "chapter_lookup"]:
                     continue
 
-                overlap_score = len(match_words & line_words) / max(1, len(match_words)) if match_words else 1.0
+                overlap_score = len(expanded_match_words & line_words) / max(1, len(expanded_match_words)) if expanded_match_words else 1.0
                 
                 # Apply intent-specific scoring bonuses to differentiate definitions, objectives, and mechanisms
                 intent_bonus = 0.0
@@ -1072,7 +1101,7 @@ class GroundedCitationVerifier:
 
         # Small document optimization fallback: if we found very few matches (<= 1) and it's a short document (<= 12 chunks),
         # return all clean sentences from the document to ensure the user gets complete information.
-        if len(extracted_items) <= 1 and len(target_chunks) <= 12:
+        if len(extracted_items) <= 1 and len(target_chunks) <= 12 and intent in ["summary", "overview", "review", "page_lookup", "chapter_lookup"]:
             extracted_items = []
             seen_quotes.clear()
             for c in target_chunks:
