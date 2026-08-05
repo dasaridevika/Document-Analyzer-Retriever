@@ -72,20 +72,38 @@ class EmbeddingService:
         # Priority 1: Cloudflare Worker Endpoint
         for w_url in self.worker_urls:
             try:
-                with httpx.Client(timeout=30.0) as client:
-                    response = client.post(w_url, json={"text": texts})
-                    if response.status_code == 200:
-                        data = response.json()
-                        vectors = data.get("data") or data.get("result", {}).get("data")
-                        if isinstance(vectors, list) and len(vectors) == len(texts):
-                            logger.info(f"Successfully generated {len(vectors)} embeddings via Cloudflare Worker.")
-                            return self.validate_vectors(vectors)
-                    elif response.status_code in [401, 403]:
-                        logger.warning(f"Cloudflare Worker embedding endpoint returned auth error HTTP {response.status_code}.")
-                    elif response.status_code == 429:
-                        logger.warning("Cloudflare Worker embedding endpoint rate-limited (HTTP 429).")
-                    else:
-                        logger.warning(f"Cloudflare Worker '{w_url}' returned HTTP {response.status_code}: {response.text}")
+                batch_size = 16
+                batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
+                all_vectors = []
+                success = True
+                
+                with httpx.Client(timeout=45.0) as client:
+                    for batch in batches:
+                        response = client.post(w_url, json={"text": batch})
+                        if response.status_code == 200:
+                            data = response.json()
+                            vectors = data.get("data") or data.get("result", {}).get("data")
+                            if isinstance(vectors, list) and len(vectors) == len(batch):
+                                all_vectors.extend(vectors)
+                            else:
+                                success = False
+                                break
+                        elif response.status_code in [401, 403]:
+                            logger.warning(f"Cloudflare Worker embedding endpoint returned auth error HTTP {response.status_code}.")
+                            success = False
+                            break
+                        elif response.status_code == 429:
+                            logger.warning("Cloudflare Worker embedding endpoint rate-limited (HTTP 429).")
+                            success = False
+                            break
+                        else:
+                            logger.warning(f"Cloudflare Worker '{w_url}' returned HTTP {response.status_code}: {response.text}")
+                            success = False
+                            break
+                            
+                if success and len(all_vectors) == len(texts):
+                    logger.info(f"Successfully generated {len(all_vectors)} embeddings via batched Cloudflare Worker.")
+                    return self.validate_vectors(all_vectors)
             except Exception as e:
                 logger.warning(f"Cloudflare Worker embedding call failed on '{w_url}': {e}")
 
