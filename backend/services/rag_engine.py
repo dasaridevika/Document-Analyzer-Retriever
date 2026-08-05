@@ -30,7 +30,8 @@ from backend.config import (
     FINAL_CONTEXT_K,
     DENSE_TOP_K,
     NO_EVIDENCE_FALLBACK_MESSAGE,
-    DEBUG_RAG
+    DEBUG_RAG,
+    ENABLE_ONNX_RERANKER
 )
 from backend.services.worker_analyzer import WORKER_BASE_URL, DEFAULT_WORKER_URL
 
@@ -241,7 +242,7 @@ class CrossEncoderReranker:
             return []
 
         # Try to use local ONNX Neural Cross-Encoder if available
-        if HAS_ONNX:
+        if HAS_ONNX and ENABLE_ONNX_RERANKER:
             if CrossEncoderReranker._neural_reranker is None:
                 try:
                     CrossEncoderReranker._neural_reranker = ONNXCrossEncoderReranker()

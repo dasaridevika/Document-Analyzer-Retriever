@@ -93,6 +93,7 @@ KEYWORD_TOP_K = int(os.getenv("KEYWORD_TOP_K", "12"))
 FINAL_CONTEXT_K = int(os.getenv("FINAL_CONTEXT_K", "6"))
 MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.60"))
 MAX_CHUNKS_PER_PAGE = int(os.getenv("MAX_CHUNKS_PER_PAGE", "3"))
+ENABLE_ONNX_RERANKER = os.getenv("ENABLE_ONNX_RERANKER", "false").lower() in ["true", "1", "yes"]
 
 # Token Chunking Constants
 DEFAULT_CHUNK_SIZE_TOKENS = int(os.getenv("DEFAULT_CHUNK_SIZE_TOKENS", "400"))
