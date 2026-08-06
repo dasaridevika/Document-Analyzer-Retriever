@@ -1416,6 +1416,100 @@ class EnterpriseRAGPipeline:
 
         return None
 
+    def _openai_rewrite_query(self, query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, QueryIntent]:
+        import json
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.openai_api_key}"
+        }
+        
+        prompt = f"""You are a query routing and rewrite engine.
+Analyze the user's query and the conversation history to classify the query intent, resolve any conversational pronouns, and rewrite the query to be a self-contained search query.
+
+Query: "{query}"
+Chat History: {json.dumps(chat_history or [])}
+
+Respond in strict JSON format:
+{{
+  "intent": "document_qa",
+  "rewritten_query": "self-contained search query",
+  "clarification_needed": false,
+  "clarification_question": ""
+}}
+
+Rules:
+1. "intent" must be exactly one of: document_qa, summary, definition, comparison, extractive, follow_up, general, or ambiguous.
+2. If the query is ambiguous, vague, or too short (e.g. a single verb like "list" or "compare" without context), set "clarification_needed" to true and provide a short clarifying question in "clarification_question". Otherwise, set "clarification_needed" to false.
+3. "rewritten_query" should be a clear, standalone search query containing all necessary keywords from the query and history.
+"""
+        try:
+            payload = {
+                "model": self.openai_model or "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "You are a precise technical classifier. Respond ONLY with raw JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"}
+            }
+            logger.info("Using OpenAI for intelligent query understanding and intent classification...")
+            resp = requests.post(url, headers=headers, json=payload, timeout=8)
+            if resp.status_code == 200:
+                res = resp.json()
+                choice = res.get("choices", [])[0]
+                content = choice.get("message", {}).get("content", "").strip()
+                parsed = json.loads(content)
+                
+                intent = parsed.get("intent", "qa")
+                rewritten_query = parsed.get("rewritten_query", query)
+                clarification_needed = parsed.get("clarification_needed", False)
+                clarification_question = parsed.get("clarification_question", "")
+                
+                # Map intents to backend expected attributes
+                retrieval_mode = "hybrid"
+                response_format = "prose"
+                broad_coverage = False
+                exact_extraction = False
+                section_specific = False
+                targets = []
+                
+                if intent == "summary":
+                    retrieval_mode = "broad"
+                    broad_coverage = True
+                    targets = ["summary", "overview"]
+                elif intent == "list_items":
+                    retrieval_mode = "hybrid"
+                    response_format = "bullets"
+                    exact_extraction = True
+                elif intent == "compare":
+                    retrieval_mode = "sectional"
+                    response_format = "table"
+                    section_specific = True
+                
+                intent_obj = QueryIntent(
+                    intent=intent,
+                    reason="Classified by OpenAI LLM",
+                    retrieval_mode=retrieval_mode,
+                    response_format=response_format,
+                    broad_coverage=broad_coverage,
+                    exact_extraction=exact_extraction,
+                    section_specific=section_specific,
+                    targets=targets,
+                    rewritten_query=rewritten_query,
+                    confidence=0.0 if clarification_needed else 0.98,
+                    ambiguity=clarification_needed,
+                    clarification_needed=clarification_needed,
+                    clarification_question=clarification_question,
+                    primary_subject=rewritten_query
+                )
+                return rewritten_query, intent_obj
+        except Exception as e:
+            logger.warning(f"OpenAI query understanding failed, falling back to heuristics: {e}")
+
+        # Fallback to local heuristic rewriter
+        return QueryRewriter.rewrite_query(query, chat_history)
+
     def process_query(
         self,
         query: str,
@@ -1458,7 +1552,10 @@ class EnterpriseRAGPipeline:
             }
 
         # Stage 2 & 3: Conversation Resolution & Intent Classification
-        resolved_q, intent_obj = QueryRewriter.rewrite_query(clean_query, chat_history)
+        if self.openai_api_key:
+            resolved_q, intent_obj = self._openai_rewrite_query(clean_query, chat_history)
+        else:
+            resolved_q, intent_obj = QueryRewriter.rewrite_query(clean_query, chat_history)
         trace.rewritten_query = resolved_q
         trace.query_intent = intent_obj.intent
         trace.retrieval_strategy = intent_obj.retrieval_strategy
