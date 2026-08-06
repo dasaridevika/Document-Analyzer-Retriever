@@ -73,6 +73,11 @@ CLOUDFLARE_API_TOKEN = get_clean_env("CLOUDFLARE_API_TOKEN")
 # Local OpenAI-Compatible LLM Settings (e.g. LM Studio, Ollama)
 LOCAL_LLM_BASE_URL = get_clean_env("LOCAL_LLM_BASE_URL")
 LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "")
+LOCAL_LLM_API_KEY = get_clean_env("LOCAL_LLM_API_KEY")
+
+# OpenAI API Settings
+OPENAI_API_KEY = get_clean_env("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Models
 CLOUDFLARE_EMBEDDING_MODEL = os.getenv("CLOUDFLARE_EMBEDDING_MODEL", "@cf/baai/bge-m3")

@@ -28,6 +28,9 @@ from backend.config import (
     CLOUDFLARE_LLM_MODEL,
     LOCAL_LLM_BASE_URL,
     LOCAL_LLM_MODEL,
+    LOCAL_LLM_API_KEY,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
     IMMUTABLE_SYSTEM_PROMPT,
     MIN_RELEVANCE_SCORE,
     FINAL_CONTEXT_K,
@@ -1308,6 +1311,9 @@ class EnterpriseRAGPipeline:
         self.api_token = CLOUDFLARE_API_TOKEN
         self.local_llm_base_url = LOCAL_LLM_BASE_URL
         self.local_llm_model = LOCAL_LLM_MODEL
+        self.local_llm_api_key = LOCAL_LLM_API_KEY
+        self.openai_api_key = OPENAI_API_KEY
+        self.openai_model = OPENAI_MODEL
         self.llm_model = CLOUDFLARE_LLM_MODEL or "@cf/zai-org/glm-4.7-flash"
         self.worker_base_url = WORKER_BASE_URL or DEFAULT_WORKER_URL
 
@@ -1937,6 +1943,8 @@ class EnterpriseRAGPipeline:
             try:
                 url = f"{self.local_llm_base_url.rstrip('/')}/chat/completions"
                 headers = {"Content-Type": "application/json"}
+                if self.local_llm_api_key:
+                    headers["Authorization"] = f"Bearer {self.local_llm_api_key}"
                 messages = [
                     {"role": "system", "content": combined_system},
                     {"role": "user", "content": query}
@@ -1969,6 +1977,48 @@ class EnterpriseRAGPipeline:
                             }
             except Exception as e:
                 logger.warning(f"Local LLM call failed or timed out: {e}")
+
+        # 0.5. Try Official OpenAI API
+        if self.openai_api_key:
+            try:
+                url = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.openai_api_key}"
+                }
+                messages = [
+                    {"role": "system", "content": combined_system},
+                    {"role": "user", "content": query}
+                ]
+                payload = {
+                    "model": self.openai_model or "gpt-4o-mini",
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": 3000
+                }
+
+                logger.info(f"Attempting official OpenAI call with model {payload['model']}...")
+                resp = requests.post(url, headers=headers, json=payload, timeout=12)
+                if resp.status_code == 200:
+                    resp_json = resp.json()
+                    choices = resp_json.get("choices", [])
+                    if choices:
+                        choice = choices[0]
+                        response_text = choice.get("message", {}).get("content", "").strip()
+                        if response_text:
+                            parsed = _extract_json_payload(response_text)
+                            if parsed:
+                                return response_text, parsed
+                            return response_text, {
+                                "answerable": True,
+                                "answer": response_text,
+                                "parts": [],
+                                "confidence": 0.95
+                            }
+                else:
+                    logger.warning(f"OpenAI call returned status code {resp.status_code}: {resp.text}")
+            except Exception as e:
+                logger.warning(f"OpenAI call failed or timed out: {e}")
 
         # 1. Try Cloudflare Worker AI Base URL
         if self.worker_base_url:
