@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 logger = logging.getLogger(__name__)
 
 # Default Live Cloudflare Worker Endpoint
-DEFAULT_WORKER_URL = "https://doc-analyser-worker.devika-worker.workers.dev"
+DEFAULT_WORKER_URL = "https://super-star-55c1.orange-firefly-a2bb.workers.dev/"
 
 # Base Worker URL (Loaded from environment variables with fallback to live worker endpoint)
 WORKER_BASE_URL = os.getenv("LLM_ANALYSIS_URL", "").strip().rstrip("/") or DEFAULT_WORKER_URL
