@@ -1203,6 +1203,20 @@ class GroundedCitationVerifier:
                             intent_bonus += 0.45
                         if any(k in s_lower for k in ["secondary school", "intermediate", "tsrjc", "zpghs", "observed", "observing"]):
                             intent_bonus -= 0.30
+
+                    # Boost positive analysis sentences if user queried about strengths/benefits
+                    if any(w in lower_q for w in ["positive", "benefit", "benefits", "strength", "strengths", "advantage", "advantages", "good", "pros", "pro", "opportunities", "success", "successes", "gain", "gains"]):
+                        if any(k in s_lower for k in ["benefit", "advantage", "strength", "opportunity", "success", "positive", "improve", "gain", "boost", "achieve", "streamline", "optimize", "excellence"]):
+                            intent_bonus += 0.45
+                        if any(k in s_lower for k in ["issue", "problem", "risk", "gap", "concern", "weakness", "drawback", "failure", "limitation", "flaw", "redundant", "unavailability", "inefficient"]):
+                            intent_bonus -= 0.30
+
+                    # Boost negative analysis sentences if user queried about issues/risks/weaknesses
+                    if any(w in lower_q for w in ["negative", "issue", "issues", "problem", "problems", "risk", "risks", "gap", "gaps", "concern", "concerns", "weakness", "weaknesses", "drawback", "drawbacks", "cons", "con", "flaw", "flaws", "limitation", "limitations", "redundant", "failure", "unavailability", "inefficient"]):
+                        if any(k in s_lower for k in ["issue", "problem", "risk", "gap", "concern", "weakness", "drawback", "failure", "limitation", "flaw", "redundant", "unavailability", "inefficient", "limitations", "redundancy"]):
+                            intent_bonus += 0.45
+                        if any(k in s_lower for k in ["benefit", "advantage", "strength", "opportunity", "success", "positive", "improve", "gain", "boost", "streamline", "optimize"]):
+                            intent_bonus -= 0.30
                 
                 final_score = overlap_score + intent_bonus
                 extracted_items.append((page_num, cid, s_clean, final_score))
