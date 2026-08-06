@@ -20,6 +20,11 @@ class TestRAGPipelineAudit(unittest.TestCase):
         self.vector_store = VectorStoreManager()
         self.vector_store.clear_all()
         self.rag = RAGEngine(embedding_service=self.embed_service, vector_store=self.vector_store)
+        # Force offline fallback mode for deterministic testing of local extractive engine
+        self.rag.openai_api_key = ""
+        self.rag.worker_base_url = ""
+        self.rag.account_id = ""
+        self.rag.api_token = ""
 
     def test_summary_query_uk_and_us_spelling(self):
         """
