@@ -1067,8 +1067,8 @@ class GroundedCitationVerifier:
             expanded_match_words.update(["project", "projects", "fashion", "recommender", "vulnerability", "assessment", "vapt", "penetration", "testing", "design", "develop", "implement", "build"])
 
         # Experience & Internships mapping
-        if any(w in lower_q_raw for w in ["experience", "internship", "internships", "work", "intern", "history", "job", "role", "roles", "suit", "career"]):
-            expanded_match_words.update(["internship", "intern", "experience", "nielit", "innovate", "apcsip", "sure", "trust", "work", "role", "roles", "cyber", "security", "cloud", "computing"])
+        if any(w in lower_q_raw for w in ["experience", "internship", "internships", "work", "intern", "history", "job", "role", "roles", "suit", "career", "suitable", "seeking", "position", "hire", "employ"]):
+            expanded_match_words.update(["internship", "intern", "experience", "work", "role", "roles", "engineer", "systems", "administrator", "developer", "analyst", "infrastructure", "linux", "windows", "pantech", "elearning", "gained", "professional", "summary"])
 
         # Document / Candidate general reference mapping
         if any(w in lower_q_raw for w in ["candidate", "resume", "pdf", "document", "cv", "person", "profile", "path", "he", "she", "his", "her", "him", "them", "their", "individual", "applicant", "engineer", "analyst", "who is", "about"]):
@@ -1190,6 +1190,13 @@ class GroundedCitationVerifier:
                         if any(k in s_lower for k in ["telangana", "hyderabad", "khammam", "india", "address", "location", "ranchi", "peddapalli", "morthad", "nizamabad"]):
                             intent_bonus += 0.45
                         if any(k in s_lower for k in ["skills:", "programming :", "databases :", "projects", "attendance"]):
+                            intent_bonus -= 0.30
+
+                    # Boost role/career sentences if user queried about role or suitability
+                    if any(w in lower_q for w in ["role", "roles", "job", "career", "suit", "suits", "suitable", "seeking", "position", "hire", "employ"]):
+                        if any(k in s_lower for k in ["engineer", "systems", "administrator", "developer", "analyst", "infrastructure", "linux", "windows", "internship", "intern", "experience", "entry-level", "professional summary"]):
+                            intent_bonus += 0.45
+                        if any(k in s_lower for k in ["secondary school", "intermediate", "tsrjc", "zpghs", "observed", "observing"]):
                             intent_bonus -= 0.30
                 
                 final_score = overlap_score + intent_bonus
