@@ -1514,6 +1514,72 @@ Rules:
         # Fallback to local heuristic rewriter
         return QueryRewriter.rewrite_query(query, chat_history)
 
+    def _worker_rewrite_query(self, query: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, QueryIntent]:
+        if not self.worker_base_url:
+            return QueryRewriter.rewrite_query(query, chat_history)
+
+        import json
+        url = f"{self.worker_base_url.rstrip('/')}/understand"
+        try:
+            logger.info("Using Cloudflare Worker AI for intelligent query understanding...")
+            payload = {
+                "query": query,
+                "chat_history": chat_history or []
+            }
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                res = resp.json()
+                content = res.get("response", "").strip()
+                parsed = json.loads(content)
+                
+                intent = parsed.get("intent", "qa")
+                rewritten_query = parsed.get("rewritten_query", query)
+                clarification_needed = parsed.get("clarification_needed", False)
+                clarification_question = parsed.get("clarification_question", "")
+                
+                retrieval_mode = "hybrid"
+                response_format = "prose"
+                broad_coverage = False
+                exact_extraction = False
+                section_specific = False
+                targets = []
+                
+                if intent == "summary":
+                    retrieval_mode = "broad"
+                    broad_coverage = True
+                    targets = ["summary", "overview"]
+                elif intent == "list_items":
+                    retrieval_mode = "hybrid"
+                    response_format = "bullets"
+                    exact_extraction = True
+                elif intent == "compare":
+                    retrieval_mode = "sectional"
+                    response_format = "table"
+                    section_specific = True
+                
+                intent_obj = QueryIntent(
+                    intent=intent,
+                    reason="Classified by Cloudflare Worker AI",
+                    retrieval_mode=retrieval_mode,
+                    response_format=response_format,
+                    broad_coverage=broad_coverage,
+                    exact_extraction=exact_extraction,
+                    section_specific=section_specific,
+                    targets=targets,
+                    rewritten_query=rewritten_query,
+                    confidence=0.0 if clarification_needed else 0.95,
+                    ambiguity=clarification_needed,
+                    clarification_needed=clarification_needed,
+                    clarification_question=clarification_question,
+                    primary_subject=rewritten_query
+                )
+                return rewritten_query, intent_obj
+        except Exception as e:
+            logger.warning(f"Cloudflare Worker query understanding failed, falling back to heuristics: {e}")
+
+        return QueryRewriter.rewrite_query(query, chat_history)
+
+
     def process_query(
         self,
         query: str,
@@ -1558,6 +1624,8 @@ Rules:
         # Stage 2 & 3: Conversation Resolution & Intent Classification
         if self.openai_api_key:
             resolved_q, intent_obj = self._openai_rewrite_query(clean_query, chat_history)
+        elif self.worker_base_url:
+            resolved_q, intent_obj = self._worker_rewrite_query(clean_query, chat_history)
         else:
             resolved_q, intent_obj = QueryRewriter.rewrite_query(clean_query, chat_history)
         trace.rewritten_query = resolved_q

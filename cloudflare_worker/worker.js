@@ -20,6 +20,80 @@ export default {
 
     try {
       // =========================================================================
+      // 0. QUERY UNDERSTANDING / REWRITE ENDPOINT
+      // =========================================================================
+      if (url.pathname === "/understand" || url.pathname === "/rewrite") {
+        if (request.method !== "POST") {
+          return new Response(JSON.stringify({ error: "Method not allowed" }), {
+            status: 405,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        const body = await request.json();
+        const query = body.query || body.prompt || "";
+        const chatHistory = body.chat_history || [];
+
+        const prompt = `You are a query routing and rewrite engine.
+Analyze the user's query and the conversation history to classify the query intent, resolve any conversational pronouns, and rewrite the query to be a self-contained search query.
+
+Query: "${query}"
+Chat History: ${JSON.stringify(chatHistory)}
+
+Respond in strict JSON format:
+{
+  "intent": "document_qa",
+  "rewritten_query": "self-contained search query",
+  "clarification_needed": false,
+  "clarification_question": ""
+}
+
+Rules:
+1. "intent" must be exactly one of: document_qa, summary, definition, comparison, extractive, follow_up, general, or ambiguous.
+2. If the query is ambiguous, vague, or too short (e.g. a single verb like "list" or "compare" without context), set "clarification_needed" to true and provide a short clarifying question in "clarification_question". Otherwise, set "clarification_needed" to false.
+3. "rewritten_query" should be a clear, standalone search query containing all necessary keywords from the query and history.`;
+
+        let result;
+        let chosenModel = "@cf/zai-org/glm-4.7-flash";
+        try {
+          result = await env.AI.run("@cf/zai-org/glm-4.7-flash", {
+            messages: [
+              { role: "system", content: "You respond ONLY with raw JSON." },
+              { role: "user", content: prompt }
+            ]
+          });
+        } catch (err) {
+          chosenModel = "@cf/meta/llama-3.1-8b-instruct-fp8";
+          try {
+            result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
+              messages: [
+                { role: "system", content: "You respond ONLY with raw JSON." },
+                { role: "user", content: prompt }
+              ]
+            });
+          } catch (err2) {
+            chosenModel = "@cf/meta/llama-3.2-3b-instruct";
+            result = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+              messages: [
+                { role: "system", content: "You respond ONLY with raw JSON." },
+                { role: "user", content: prompt }
+              ]
+            });
+          }
+        }
+
+        const responseText = (typeof result === 'object' && result.response) ? result.response : String(result);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            model: chosenModel,
+            response: responseText.trim(),
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // =========================================================================
       // 1. EMBEDDINGS ENDPOINT (@cf/baai/bge-m3)
       // =========================================================================
       if (url.pathname === "/embeddings" || url.pathname === "/embed") {
