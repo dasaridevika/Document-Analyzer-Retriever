@@ -1090,6 +1090,10 @@ class GroundedCitationVerifier:
         if any(w in lower_q_raw for w in ["topic", "topics", "concept", "concepts", "cover", "covers", "contain", "contains", "subject", "subjects", "content", "contents", "about", "index", "chapter", "chapters"]):
             expanded_match_words.update(["summary", "overview", "introduction", "preface", "abstract", "index", "content", "contents", "topics", "concepts", "chapters", "variables", "lists", "functions", "classes", "loops"])
 
+        # Objectives / Aims / Goals mapping
+        if any(w in lower_q_raw for w in ["objective", "objectives", "aim", "aims", "goal", "goals", "purpose", "purposes", "target", "targets"]):
+            expanded_match_words.update(["objective", "objectives", "aim", "aims", "goal", "goals", "purpose", "purposes", "target", "targets", "increase", "improve", "control", "minimize", "maintain", "reduce", "enhance"])
+
         extracted_items = []
         seen_quotes: Set[str] = set()
 
@@ -1876,7 +1880,9 @@ Rules:
             "role", "suit", "summarize", "summary", "overview", "who is",
             "evaluate", "strength", "weakness", "improve", "analyse", "analyze",
             "opinion", "suggestion", "recommend", "fit", "rate", "review", "where is",
-            "topic", "topics", "concept", "concepts", "cover", "covers", "content", "contents"
+            "topic", "topics", "concept", "concepts", "cover", "covers", "content", "contents",
+            "objective", "objectives", "aim", "aims", "goal", "goals", "purpose", "purposes",
+            "explain", "explains", "explanation", "explanations"
         ]
         is_broad = any(trigger in sub_q.lower() for trigger in abstract_triggers) or len(sub_q.split()) <= 3
 
@@ -1919,6 +1925,8 @@ Rules:
                 expansion_terms = "agreement terms, contract clause, liability, termination, payment obligations"
             elif any(w in lower_sub_q for w in ["topic", "topics", "concept", "concepts", "cover", "covers", "contain", "contains", "subject", "subjects", "content", "contents", "about", "index", "chapter", "chapters"]):
                 expansion_terms = "document summary, overview, table of contents, main topics, introduction, abstract, index"
+            elif any(w in lower_sub_q for w in ["objective", "objectives", "aim", "aims", "goal", "goals", "purpose", "purposes"]):
+                expansion_terms = "objectives, purpose, goals, aims, target, key objectives, main purposes"
 
             if expansion_terms:
                 search_query = f"{sub_q} {expansion_terms}"
